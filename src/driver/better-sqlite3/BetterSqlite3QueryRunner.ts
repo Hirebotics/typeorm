@@ -1,9 +1,11 @@
 import { QueryRunnerAlreadyReleasedError } from "../../error/QueryRunnerAlreadyReleasedError"
-import { QueryFailedError } from "../../error/QueryFailedError"
 import { AbstractSqliteQueryRunner } from "../sqlite-abstract/AbstractSqliteQueryRunner"
 import { Broadcaster } from "../../subscriber/Broadcaster"
 import { BetterSqlite3Driver } from "./BetterSqlite3Driver"
 import { QueryResult } from "../../query-runner/QueryResult"
+import { BetterSqlite3ConnectionOptions } from "./BetterSqlite3ConnectionOptions"
+import { QueryFailedError } from "../../error/QueryFailedError"
+import { BroadcasterResult } from "../../subscriber/BroadcasterResult"
 
 /**
  * Runs queries on a single sqlite database connection.
@@ -82,54 +84,124 @@ export class BetterSqlite3QueryRunner extends AbstractSqliteQueryRunner {
         if (this.isReleased) throw new QueryRunnerAlreadyReleasedError()
 
         const connection = this.driver.connection
+        const options = connection.options as BetterSqlite3ConnectionOptions
+        const maxQueryExecutionTime = this.driver.options.maxQueryExecutionTime
+        const broadcasterResult = new BroadcasterResult()
+        const broadcaster = this.broadcaster
 
-        this.driver.connection.logger.logQuery(query, parameters, this)
-        const queryStartTime = +new Date()
+        broadcaster.broadcastBeforeQueryEvent(
+            broadcasterResult,
+            query,
+            parameters,
+        )
 
-        const stmt = await this.getStmt(query)
+        return new Promise(async (ok, fail) => {
+            try {
+                const queryStartTime = Date.now()
+                this.driver.connection.logger.logQuery(query, parameters, this)
 
-        try {
-            const result = new QueryResult()
+                const execute = async () => {
+                    try {
+                        const stmt = await this.getStmt(query)
+                        const result = new QueryResult()
 
-            if (stmt.reader) {
-                const raw = stmt.all.apply(stmt, parameters)
+                        if (stmt.reader) {
+                            const raw = stmt.all(...(parameters || []))
 
-                result.raw = raw
+                            result.raw = raw
 
-                if (Array.isArray(raw)) {
-                    result.records = raw
+                            if (Array.isArray(raw)) {
+                                result.records = raw
+                            }
+
+                            handler(null, result)
+                        } else {
+                            const raw = stmt.run(...(parameters || []))
+                            result.affected = raw.changes
+                            result.raw = raw.lastInsertRowid
+
+                            handler(null, result)
+                        }
+                    } catch (err) {
+                        handler(err, null)
+                    }
                 }
-            } else {
-                const raw = stmt.run.apply(stmt, parameters)
-                result.affected = raw.changes
-                result.raw = raw.lastInsertRowid
+
+                const self = this
+                const handler = function (
+                    err: Error | null,
+                    result: QueryResult | null,
+                ) {
+                    if (err && err.toString().indexOf("SQLITE_BUSY") !== -1) {
+                        if (
+                            typeof options.busyErrorRetry === "number" &&
+                            options.busyErrorRetry > 0
+                        ) {
+                            setTimeout(execute, options.busyErrorRetry)
+                            return
+                        }
+                    }
+
+                    // log slow queries if maxQueryExecution time is set
+                    const queryEndTime = Date.now()
+                    const queryExecutionTime = queryEndTime - queryStartTime
+                    if (
+                        maxQueryExecutionTime &&
+                        queryExecutionTime > maxQueryExecutionTime
+                    )
+                        connection.logger.logQuerySlow(
+                            queryExecutionTime,
+                            query,
+                            parameters,
+                            self,
+                        )
+
+                    if (err) {
+                        connection.logger.logQueryError(
+                            err,
+                            query,
+                            parameters,
+                            self,
+                        )
+                        broadcaster.broadcastAfterQueryEvent(
+                            broadcasterResult,
+                            query,
+                            parameters,
+                            false,
+                            undefined,
+                            undefined,
+                            err,
+                        )
+
+                        return fail(
+                            new QueryFailedError(query, parameters, err),
+                        )
+                    } else if (result) {
+                        broadcaster.broadcastAfterQueryEvent(
+                            broadcasterResult,
+                            query,
+                            parameters,
+                            true,
+                            queryExecutionTime,
+                            result.raw,
+                            undefined,
+                        )
+
+                        if (useStructuredResult) {
+                            ok(result)
+                        } else {
+                            ok(result.raw)
+                        }
+                    }
+                }
+
+                await execute()
+            } catch (err) {
+                fail(err)
+            } finally {
+                await broadcasterResult.wait()
             }
-
-            // log slow queries if maxQueryExecution time is set
-            const maxQueryExecutionTime =
-                this.driver.options.maxQueryExecutionTime
-            const queryEndTime = +new Date()
-            const queryExecutionTime = queryEndTime - queryStartTime
-            if (
-                maxQueryExecutionTime &&
-                queryExecutionTime > maxQueryExecutionTime
-            )
-                connection.logger.logQuerySlow(
-                    queryExecutionTime,
-                    query,
-                    parameters,
-                    this,
-                )
-
-            if (!useStructuredResult) {
-                return result.raw
-            }
-
-            return result
-        } catch (err) {
-            connection.logger.logQueryError(err, query, parameters, this)
-            throw new QueryFailedError(query, parameters, err)
-        }
+        })
     }
 
     // -------------------------------------------------------------------------

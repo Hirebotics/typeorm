@@ -91,6 +91,7 @@ export class SqliteQueryRunner extends AbstractSqliteQueryRunner {
                     }
                 }
 
+                var self = this
                 const handler = function (err: any, rows: any) {
                     if (err && err.toString().indexOf("SQLITE_BUSY:") !== -1) {
                         if (
@@ -108,20 +109,21 @@ export class SqliteQueryRunner extends AbstractSqliteQueryRunner {
                     if (
                         maxQueryExecutionTime &&
                         queryExecutionTime > maxQueryExecutionTime
-                    )
+                    ) {
                         connection.logger.logQuerySlow(
                             queryExecutionTime,
                             query,
                             parameters,
-                            this,
+                            self,
                         )
+                    }
 
                     if (err) {
                         connection.logger.logQueryError(
                             err,
                             query,
                             parameters,
-                            this,
+                            self,
                         )
                         broadcaster.broadcastAfterQueryEvent(
                             broadcasterResult,
