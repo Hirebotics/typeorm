@@ -80,14 +80,14 @@ export interface BetterSqlite3ConnectionOptions extends BaseDataSourceOptions {
     /**
      * Retry interval in milliseconds when encountering SQLITE_BUSY errors during writes.
      * SQLite can only handle one write at a time, so this helps handle concurrent write attempts.
-     * Default: 5000
+     * Default: 0 (no retries)
      */
     readonly busyErrorRetryInterval?: number
 
     /**
      * The maximum number of times to retry a query when a SQLITE_BUSY error occurs.
      * When falsy (nil or 0) then the query will be retried indefinitely.
-     * Default: 0
+     * Default: 0 (infinite retries)
      */
     readonly busyErrorRetryLimit?: number
 }
