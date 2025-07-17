@@ -76,6 +76,7 @@ export class SqliteQueryRunner extends AbstractSqliteQueryRunner {
 
         return new Promise(async (ok, fail) => {
             try {
+                const self = this
                 const databaseConnection = await this.connect()
                 this.driver.connection.logger.logQuery(query, parameters, this)
                 const queryStartTime = +new Date()
@@ -91,7 +92,6 @@ export class SqliteQueryRunner extends AbstractSqliteQueryRunner {
                     }
                 }
 
-                var self = this
                 const handler = function (err: any, rows: any) {
                     if (err && err.toString().indexOf("SQLITE_BUSY:") !== -1) {
                         if (

@@ -89,6 +89,10 @@ export class BetterSqlite3QueryRunner extends AbstractSqliteQueryRunner {
         const broadcasterResult = new BroadcasterResult()
         const broadcaster = this.broadcaster
 
+        const busyErrorRetryInterval = options.busyErrorRetryInterval || 0
+        const busyErrorRetryLimit = options.busyErrorRetryLimit || 0
+        let busyErrorRetryCount = 0
+
         broadcaster.broadcastBeforeQueryEvent(
             broadcasterResult,
             query,
@@ -97,6 +101,7 @@ export class BetterSqlite3QueryRunner extends AbstractSqliteQueryRunner {
 
         return new Promise(async (ok, fail) => {
             try {
+                const self = this
                 const queryStartTime = Date.now()
                 this.driver.connection.logger.logQuery(query, parameters, this)
 
@@ -127,19 +132,51 @@ export class BetterSqlite3QueryRunner extends AbstractSqliteQueryRunner {
                     }
                 }
 
-                const self = this
+                const failQuery = (err: Error) => {
+                    connection.logger.logQueryError(
+                        err,
+                        query,
+                        parameters,
+                        self,
+                    )
+                    broadcaster.broadcastAfterQueryEvent(
+                        broadcasterResult,
+                        query,
+                        parameters,
+                        false,
+                        undefined,
+                        undefined,
+                        err,
+                    )
+                    fail(new QueryFailedError(query, parameters, err))
+                }
+
                 const handler = function (
                     err: Error | null,
                     result: QueryResult | null,
                 ) {
-                    if (err && err.toString().indexOf("SQLITE_BUSY") !== -1) {
+                    if (
+                        busyErrorRetryInterval > 0 &&
+                        self.isSqliteError(err, "SQLITE_BUSY")
+                    ) {
+                        busyErrorRetryCount++
                         if (
-                            typeof options.busyErrorRetry === "number" &&
-                            options.busyErrorRetry > 0
+                            busyErrorRetryLimit > 0 &&
+                            busyErrorRetryCount > busyErrorRetryLimit
                         ) {
-                            setTimeout(execute, options.busyErrorRetry)
+                            connection.logger.log(
+                                "warn",
+                                `Sqlite is busy, but retry limit reached, failing query`,
+                            )
+                            failQuery(err)
                             return
                         }
+                        connection.logger.log(
+                            "info",
+                            `Sqlite is busy, retrying query after ${busyErrorRetryInterval}ms (attempt ${busyErrorRetryCount} of ${busyErrorRetryLimit})`,
+                        )
+                        setTimeout(execute, busyErrorRetryInterval)
+                        return
                     }
 
                     // log slow queries if maxQueryExecution time is set
@@ -148,34 +185,17 @@ export class BetterSqlite3QueryRunner extends AbstractSqliteQueryRunner {
                     if (
                         maxQueryExecutionTime &&
                         queryExecutionTime > maxQueryExecutionTime
-                    )
+                    ) {
                         connection.logger.logQuerySlow(
                             queryExecutionTime,
                             query,
                             parameters,
                             self,
                         )
+                    }
 
                     if (err) {
-                        connection.logger.logQueryError(
-                            err,
-                            query,
-                            parameters,
-                            self,
-                        )
-                        broadcaster.broadcastAfterQueryEvent(
-                            broadcasterResult,
-                            query,
-                            parameters,
-                            false,
-                            undefined,
-                            undefined,
-                            err,
-                        )
-
-                        return fail(
-                            new QueryFailedError(query, parameters, err),
-                        )
+                        failQuery(err)
                     } else if (result) {
                         broadcaster.broadcastAfterQueryEvent(
                             broadcasterResult,
@@ -232,5 +252,39 @@ export class BetterSqlite3QueryRunner extends AbstractSqliteQueryRunner {
             }${pragma}("${tableName}")`,
         )
         return res
+    }
+
+    /**
+     * Check if the error is a specific sqlite error.
+     * Returns true if the error's `code` is the string to find,
+     * or if the error's `message` contains the string to find.
+     *
+     * Example:
+     * ```
+     * [SqliteError] {
+     *   code: 'SQLITE_BUSY',
+     *   message: 'database is locked',
+     *   toString: 'SqliteError: database is locked',
+     * }
+     *
+     * isSqliteError(err, 'SQLITE_BUSY')         // true
+     * isSqliteError(err, 'database is locked')  // true
+     * isSqliteError(err, 'lorem ipsum')         // false
+     * ```
+     */
+    protected isSqliteError(
+        err: Error | null,
+        stringToFind: string,
+    ): err is Error {
+        if (!err) {
+            return false
+        }
+        if ((err as any).code === stringToFind) {
+            return true
+        }
+        if (err.toString().indexOf(stringToFind) !== -1) {
+            return true
+        }
+        return false
     }
 }
