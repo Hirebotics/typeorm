@@ -259,6 +259,8 @@ export class BetterSqlite3QueryRunner extends AbstractSqliteQueryRunner {
      * Returns true if the error's `code` is the string to find,
      * or if the error's `message` contains the string to find.
      *
+     * https://github.com/WiseLibs/better-sqlite3/blob/master/lib/sqlite-error.js
+     *
      * Example:
      * ```
      * [SqliteError] {
@@ -273,13 +275,13 @@ export class BetterSqlite3QueryRunner extends AbstractSqliteQueryRunner {
      * ```
      */
     protected isSqliteError(
-        err: Error | null,
+        err: (Error & { code?: string }) | null,
         stringToFind: string,
     ): err is Error {
         if (!err) {
             return false
         }
-        if ((err as any).code === stringToFind) {
+        if (err.code === stringToFind) {
             return true
         }
         if (err.toString().indexOf(stringToFind) !== -1) {
