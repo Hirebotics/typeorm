@@ -389,7 +389,7 @@ export async function createTestingConnections(
 ): Promise<DataSource[]> {
     const dataSourceOptions = setupTestingConnections(options)
     const dataSources: DataSource[] = []
-    for (let options of dataSourceOptions) {
+    for (const options of dataSourceOptions) {
         const dataSource = createDataSource(options)
         await dataSource.initialize()
         dataSources.push(dataSource)
@@ -483,24 +483,25 @@ export async function createTestingConnections(
 /**
  * Closes testing connections if they are connected.
  */
-export function closeTestingConnections(connections: DataSource[]) {
-    return Promise.all(
-        connections.map((connection) =>
-            connection && connection.isInitialized
-                ? connection.destroy()
-                : undefined,
-        ),
-    )
+export async function closeTestingConnections(connections: DataSource[]) {
+    // Run actions sequentially to avoid database locking
+    for (const connection of connections) {
+        if (connection && connection.isInitialized) {
+            await connection.destroy()
+        }
+    }
 }
 
 /**
  * Reloads all databases for all given connections.
  */
-export function reloadTestingDatabases(connections: DataSource[]) {
+export async function reloadTestingDatabases(connections: DataSource[]) {
     GeneratedColumnReplacerSubscriber.globalIncrementValues = {}
-    return Promise.all(
-        connections.map((connection) => connection.synchronize(true)),
-    )
+
+    // Run actions sequentially to avoid database locking
+    for (const connection of connections) {
+        await connection.synchronize(true)
+    }
 }
 
 /**
