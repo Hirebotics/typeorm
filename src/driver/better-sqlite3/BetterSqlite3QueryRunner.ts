@@ -281,7 +281,7 @@ export class BetterSqlite3QueryRunner extends AbstractSqliteQueryRunner {
         if (!err) {
             return false
         }
-        if (err.code === stringToFind) {
+        if (err.code?.startsWith(stringToFind)) {
             return true
         }
         if (err.toString().indexOf(stringToFind) !== -1) {
