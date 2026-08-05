@@ -260,9 +260,13 @@ export class BetterSqlite3QueryRunner extends AbstractSqliteQueryRunner {
     }
     protected async loadPragmaRecords(tablePath: string, pragma: string) {
         const [database, tableName] = this.splitTablePath(tablePath)
-        const databaseConnection = await this.connect()
-        const res = databaseConnection.pragma(
-            `${database ? `"${database}".` : ""}${pragma}("${tableName}")`,
+        // Routed through query() on purpose -- see beforeMigration().
+        // databaseConnection.pragma() bypasses the retry and falls back to
+        // better-sqlite3's synchronous timeout, which blocks the event loop.
+        const res = await this.query(
+            `PRAGMA ${
+                database ? `"${database}".` : ""
+            }${pragma}("${tableName}")`,
         )
         return res
     }
