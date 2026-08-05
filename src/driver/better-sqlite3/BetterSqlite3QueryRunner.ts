@@ -1,13 +1,3 @@
-<<<<<<< HEAD
-import { QueryRunnerAlreadyReleasedError } from "../../error/QueryRunnerAlreadyReleasedError"
-import { AbstractSqliteQueryRunner } from "../sqlite-abstract/AbstractSqliteQueryRunner"
-import { Broadcaster } from "../../subscriber/Broadcaster"
-import { BetterSqlite3Driver } from "./BetterSqlite3Driver"
-import { QueryResult } from "../../query-runner/QueryResult"
-import { BetterSqlite3ConnectionOptions } from "./BetterSqlite3ConnectionOptions"
-import { QueryFailedError } from "../../error/QueryFailedError"
-import { BroadcasterResult } from "../../subscriber/BroadcasterResult"
-=======
 import { QueryFailedError } from "../../error/QueryFailedError"
 import { QueryRunnerAlreadyReleasedError } from "../../error/QueryRunnerAlreadyReleasedError"
 import { QueryResult } from "../../query-runner/QueryResult"
@@ -17,7 +7,6 @@ import { NamedPlaceholdersNotSupportedError } from "../../error/NamedPlaceholder
 import type { ObjectLiteral } from "../../common/ObjectLiteral"
 import { AbstractSqliteQueryRunner } from "../sqlite-abstract/AbstractSqliteQueryRunner"
 import type { BetterSqlite3Driver } from "./BetterSqlite3Driver"
->>>>>>> origin/master
 
 /**
  * Runs queries on a single sqlite database connection.
@@ -103,17 +92,6 @@ export class BetterSqlite3QueryRunner extends AbstractSqliteQueryRunner {
         if (parameters && !Array.isArray(parameters))
             throw new NamedPlaceholdersNotSupportedError()
 
-<<<<<<< HEAD
-        const connection = this.driver.connection
-        const options = connection.options as BetterSqlite3ConnectionOptions
-        const maxQueryExecutionTime = this.driver.options.maxQueryExecutionTime
-        const broadcasterResult = new BroadcasterResult()
-        const broadcaster = this.broadcaster
-
-        const busyErrorRetryInterval = options.busyErrorRetryInterval || 0
-        const busyErrorRetryLimit = options.busyErrorRetryLimit || 0
-        let busyErrorRetryCount = 0
-=======
         const dataSource = this.driver.dataSource
 
         // better-sqlite3 cannot bind booleans, convert to 0/1
@@ -134,191 +112,117 @@ export class BetterSqlite3QueryRunner extends AbstractSqliteQueryRunner {
             normalizedParameters,
         )
         const queryStartTime = Date.now()
->>>>>>> origin/master
 
-        broadcaster.broadcastBeforeQueryEvent(
-            broadcasterResult,
-            query,
-            parameters,
-        )
+        // Sqlite serializes writes, so a concurrent write fails fast with
+        // SQLITE_BUSY rather than queueing. Retry it ourselves.
+        const busyErrorRetryInterval =
+            this.driver.options.busyErrorRetryInterval ?? 0
+        const busyErrorRetryLimit = this.driver.options.busyErrorRetryLimit ?? 0
+        let busyErrorRetryCount = 0
 
-        return new Promise(async (ok, fail) => {
-            try {
-                const self = this
-                const queryStartTime = Date.now()
-                this.driver.connection.logger.logQuery(query, parameters, this)
+        try {
+            while (true) {
+                try {
+                    // getStmt is inside the retry: prepare() can hit SQLITE_BUSY too
+                    const stmt = await this.getStmt(query)
+                    const result = new QueryResult()
 
-<<<<<<< HEAD
-                const execute = async () => {
-                    try {
-                        const stmt = await this.getStmt(query)
-                        const result = new QueryResult()
-=======
-            if (stmt.reader) {
-                const raw = stmt.all(...normalizedParameters)
->>>>>>> origin/master
+                    if (stmt.reader) {
+                        const raw = stmt.all(...normalizedParameters)
 
-                        if (stmt.reader) {
-                            const raw = stmt.all(...(parameters || []))
+                        result.raw = raw
 
-                            result.raw = raw
-
-                            if (Array.isArray(raw)) {
-                                result.records = raw
-                            }
-
-                            handler(null, result)
-                        } else {
-                            const raw = stmt.run(...(parameters || []))
-                            result.affected = raw.changes
-                            result.raw = raw.lastInsertRowid
-
-                            handler(null, result)
+                        if (Array.isArray(raw)) {
+                            result.records = raw
                         }
-                    } catch (err) {
-                        handler(err, null)
+                    } else {
+                        const raw = stmt.run(...normalizedParameters)
+                        result.affected = raw.changes
+                        result.raw = raw.lastInsertRowid
                     }
-                }
-<<<<<<< HEAD
 
-                const failQuery = (err: Error) => {
-                    connection.logger.logQueryError(
-                        err,
-                        query,
-                        parameters,
-                        self,
+                    // log slow queries if maxQueryExecution time is set
+                    const maxQueryExecutionTime =
+                        this.driver.options.maxQueryExecutionTime
+                    const queryEndTime = Date.now()
+                    const queryExecutionTime = queryEndTime - queryStartTime
+                    if (
+                        maxQueryExecutionTime &&
+                        queryExecutionTime > maxQueryExecutionTime
                     )
-                    broadcaster.broadcastAfterQueryEvent(
+                        dataSource.logger.logQuerySlow(
+                            queryExecutionTime,
+                            query,
+                            normalizedParameters,
+                            this,
+                        )
+
+                    this.broadcaster.broadcastAfterQueryEvent(
                         broadcasterResult,
                         query,
-                        parameters,
-                        false,
+                        normalizedParameters,
+                        true,
+                        queryExecutionTime,
+                        result.raw,
                         undefined,
-                        undefined,
-                        err,
                     )
-                    fail(new QueryFailedError(query, parameters, err))
-                }
 
-                const handler = function (
-                    err: Error | null,
-                    result: QueryResult | null,
-                ) {
+                    if (!useStructuredResult) {
+                        return result.raw
+                    }
+
+                    return result
+                } catch (err) {
+                    // Async sleep, never sqlite3_busy_timeout:
+                    // better-sqlite3 is synchronous, so a busy_timeout would block
+                    // the whole event loop, and sqlite skips the busy handler
+                    // entirely for SQLITE_BUSY_SNAPSHOT.
                     if (
                         busyErrorRetryInterval > 0 &&
-                        self.isSqliteError(err, "SQLITE_BUSY")
+                        this.isSqliteError(err, "SQLITE_BUSY")
                     ) {
                         busyErrorRetryCount++
                         if (
                             busyErrorRetryLimit > 0 &&
                             busyErrorRetryCount > busyErrorRetryLimit
                         ) {
-                            connection.logger.log(
+                            dataSource.logger.log(
                                 "warn",
                                 `Sqlite is busy, but retry limit reached, failing query`,
                             )
-                            failQuery(err)
-                            return
-                        }
-                        connection.logger.log(
-                            "info",
-                            `Sqlite is busy, retrying query after ${busyErrorRetryInterval}ms (attempt ${busyErrorRetryCount} of ${busyErrorRetryLimit})`,
-                        )
-                        setTimeout(execute, busyErrorRetryInterval)
-                        return
-                    }
-
-                    // log slow queries if maxQueryExecution time is set
-                    const queryEndTime = Date.now()
-                    const queryExecutionTime = queryEndTime - queryStartTime
-                    if (
-                        maxQueryExecutionTime &&
-                        queryExecutionTime > maxQueryExecutionTime
-                    ) {
-                        connection.logger.logQuerySlow(
-                            queryExecutionTime,
-                            query,
-                            parameters,
-                            self,
-                        )
-                    }
-
-                    if (err) {
-                        failQuery(err)
-                    } else if (result) {
-                        broadcaster.broadcastAfterQueryEvent(
-                            broadcasterResult,
-                            query,
-                            parameters,
-                            true,
-                            queryExecutionTime,
-                            result.raw,
-                            undefined,
-                        )
-
-                        if (useStructuredResult) {
-                            ok(result)
                         } else {
-                            ok(result.raw)
+                            dataSource.logger.log(
+                                "info",
+                                `Sqlite is busy, retrying query after ${busyErrorRetryInterval}ms (attempt ${busyErrorRetryCount} of ${busyErrorRetryLimit})`,
+                            )
+                            await new Promise((resolve) =>
+                                setTimeout(resolve, busyErrorRetryInterval),
+                            )
+                            continue
                         }
                     }
+
+                    dataSource.logger.logQueryError(
+                        err,
+                        query,
+                        normalizedParameters,
+                        this,
+                    )
+                    this.broadcaster.broadcastAfterQueryEvent(
+                        broadcasterResult,
+                        query,
+                        normalizedParameters,
+                        false,
+                        undefined,
+                        undefined,
+                        err,
+                    )
+                    throw new QueryFailedError(query, normalizedParameters, err)
                 }
-
-                await execute()
-            } catch (err) {
-                fail(err)
-            } finally {
-                await broadcasterResult.wait()
             }
-        })
-=======
-            } else {
-                const raw = stmt.run(...normalizedParameters)
-                result.affected = raw.changes
-                result.raw = raw.lastInsertRowid
-            }
-
-            // log slow queries if maxQueryExecution time is set
-            const maxQueryExecutionTime =
-                this.driver.options.maxQueryExecutionTime
-            const queryEndTime = Date.now()
-            const queryExecutionTime = queryEndTime - queryStartTime
-            if (
-                maxQueryExecutionTime &&
-                queryExecutionTime > maxQueryExecutionTime
-            )
-                dataSource.logger.logQuerySlow(
-                    queryExecutionTime,
-                    query,
-                    normalizedParameters,
-                    this,
-                )
-
-            this.broadcaster.broadcastAfterQueryEvent(
-                broadcasterResult,
-                query,
-                normalizedParameters,
-                true,
-                queryExecutionTime,
-                result.raw,
-                undefined,
-            )
-
-            if (!useStructuredResult) {
-                return result.raw
-            }
-
-            return result
-        } catch (err) {
-            dataSource.logger.logQueryError(
-                err,
-                query,
-                normalizedParameters,
-                this,
-            )
-            throw new QueryFailedError(query, normalizedParameters, err)
+        } finally {
+            await broadcasterResult.wait()
         }
->>>>>>> origin/master
     }
 
     // -------------------------------------------------------------------------
