@@ -1,12 +1,12 @@
-import { EntityMetadata } from "../metadata/EntityMetadata"
-import { DataSource } from "../data-source/DataSource"
-import { RelationMetadata } from "../metadata/RelationMetadata"
-import { QueryBuilderUtils } from "./QueryBuilderUtils"
-import { QueryExpressionMap } from "./QueryExpressionMap"
-import { Alias } from "./Alias"
-import { ObjectUtils } from "../util/ObjectUtils"
-import { TypeORMError } from "../error"
+import type { DataSource } from "../data-source/DataSource"
 import { DriverUtils } from "../driver/DriverUtils"
+import { TypeORMError } from "../error"
+import type { EntityMetadata } from "../metadata/EntityMetadata"
+import type { RelationMetadata } from "../metadata/RelationMetadata"
+import { ObjectUtils } from "../util/ObjectUtils"
+import type { Alias } from "./Alias"
+import { QueryBuilderUtils } from "./QueryBuilderUtils"
+import type { QueryExpressionMap } from "./QueryExpressionMap"
 
 /**
  * Stores all join attributes which will be used to build a JOIN query.
@@ -56,7 +56,7 @@ export class JoinAttribute {
     // -------------------------------------------------------------------------
 
     constructor(
-        private connection: DataSource,
+        private dataSource: DataSource,
         private queryExpressionMap: QueryExpressionMap,
         joinAttribute?: JoinAttribute,
     ) {
@@ -85,7 +85,7 @@ export class JoinAttribute {
      */
     get isSelected(): boolean {
         if (!this.isSelectedEvaluated) {
-            let getValue = () => {
+            const getValue = () => {
                 for (const select of this.queryExpressionMap.selects) {
                     if (select.selection === this.alias.name) return true
 
@@ -127,7 +127,7 @@ export class JoinAttribute {
         if (!QueryBuilderUtils.isAliasProperty(this.entityOrProperty))
             return undefined
 
-        return this.entityOrProperty.substr(
+        return this.entityOrProperty.slice(
             0,
             this.entityOrProperty.indexOf("."),
         )
@@ -144,7 +144,7 @@ export class JoinAttribute {
         if (!QueryBuilderUtils.isAliasProperty(this.entityOrProperty))
             return undefined
 
-        return this.entityOrProperty.substr(
+        return this.entityOrProperty.slice(
             this.entityOrProperty.indexOf(".") + 1,
         )
     }
@@ -159,7 +159,7 @@ export class JoinAttribute {
      */
     get relation(): RelationMetadata | undefined {
         if (!this.relationEvaluated) {
-            let getValue = () => {
+            const getValue = () => {
                 if (!QueryBuilderUtils.isAliasProperty(this.entityOrProperty))
                     return undefined
 
@@ -203,27 +203,15 @@ export class JoinAttribute {
         if (this.relation) return this.relation.inverseEntityMetadata
 
         // entityOrProperty is Entity class
-        if (this.connection.hasMetadata(this.entityOrProperty))
-            return this.connection.getMetadata(this.entityOrProperty)
+        if (this.dataSource.hasMetadata(this.entityOrProperty))
+            return this.dataSource.getMetadata(this.entityOrProperty)
 
         // Overriden mapping entity provided for leftJoinAndMapOne with custom query builder
-        if (this.mapAsEntity && this.connection.hasMetadata(this.mapAsEntity)) {
-            return this.connection.getMetadata(this.mapAsEntity)
+        if (this.mapAsEntity && this.dataSource.hasMetadata(this.mapAsEntity)) {
+            return this.dataSource.getMetadata(this.mapAsEntity)
         }
 
         return undefined
-
-        /*if (typeof this.entityOrProperty === "string") { // entityOrProperty is a custom table
-
-            // first try to find entity with such name, this is needed when entity does not have a target class,
-            // and its target is a string name (scenario when plain old javascript is used or entity schema is loaded from files)
-            const metadata = this.connection.entityMetadatas.find(metadata => metadata.name === this.entityOrProperty);
-            if (metadata)
-                return metadata;
-
-            // check if we have entity with such table name, and use its metadata if found
-            return this.connection.entityMetadatas.find(metadata => metadata.tableName === this.entityOrProperty);
-        }*/
     }
 
     /**
@@ -239,21 +227,21 @@ export class JoinAttribute {
             throw new TypeORMError(`Junction property is not defined.`)
         }
 
-        const aliasProperty = this.entityOrProperty.substr(
+        const aliasProperty = this.entityOrProperty.slice(
             0,
             this.entityOrProperty.indexOf("."),
         )
 
         if (this.relation.isOwning) {
             return DriverUtils.buildAlias(
-                this.connection.driver,
+                this.dataSource.driver,
                 undefined,
                 aliasProperty,
                 this.alias.name,
             )
         } else {
             return DriverUtils.buildAlias(
-                this.connection.driver,
+                this.dataSource.driver,
                 undefined,
                 this.alias.name,
                 aliasProperty,
@@ -272,4 +260,9 @@ export class JoinAttribute {
 
         return this.mapToProperty!.split(".")[1]
     }
+}
+
+export interface JoinAttributeTree {
+    children: Array<JoinAttributeTree>
+    joinAttribute: JoinAttribute
 }

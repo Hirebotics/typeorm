@@ -1,10 +1,12 @@
-import { QueryRunnerAlreadyReleasedError } from "../../error/QueryRunnerAlreadyReleasedError"
-import { AbstractSqliteQueryRunner } from "../sqlite-abstract/AbstractSqliteQueryRunner"
-import { SqljsDriver } from "./SqljsDriver"
-import { Broadcaster } from "../../subscriber/Broadcaster"
+import type { ObjectLiteral } from "../../common/ObjectLiteral"
+import { NamedPlaceholdersNotSupportedError } from "../../error/NamedPlaceholdersNotSupportedError"
 import { QueryFailedError } from "../../error/QueryFailedError"
+import { QueryRunnerAlreadyReleasedError } from "../../error/QueryRunnerAlreadyReleasedError"
 import { QueryResult } from "../../query-runner/QueryResult"
+import { Broadcaster } from "../../subscriber/Broadcaster"
 import { BroadcasterResult } from "../../subscriber/BroadcasterResult"
+import { AbstractSqliteQueryRunner } from "../sqlite-abstract/AbstractSqliteQueryRunner"
+import type { SqljsDriver } from "./SqljsDriver"
 
 /**
  * Runs queries on a single sqlite database connection.
@@ -27,7 +29,7 @@ export class SqljsQueryRunner extends AbstractSqliteQueryRunner {
     constructor(driver: SqljsDriver) {
         super()
         this.driver = driver
-        this.connection = driver.connection
+        this.dataSource = driver.dataSource
         this.broadcaster = new Broadcaster(this)
     }
 
@@ -74,28 +76,31 @@ export class SqljsQueryRunner extends AbstractSqliteQueryRunner {
 
     /**
      * Executes a given SQL query.
+     *
+     * @param query
+     * @param parameters
+     * @param useStructuredResult
      */
     async query(
         query: string,
-        parameters: any[] = [],
+        parameters: any[] | ObjectLiteral = [],
         useStructuredResult = false,
     ): Promise<any> {
         if (this.isReleased) throw new QueryRunnerAlreadyReleasedError()
+        if (parameters && !Array.isArray(parameters))
+            throw new NamedPlaceholdersNotSupportedError()
 
         const command = query.trim().split(" ", 1)[0]
 
         const databaseConnection = this.driver.databaseConnection
+
+        this.driver.dataSource.logger.logQuery(query, parameters, this)
+        await this.broadcaster.broadcast("BeforeQuery", query, parameters)
+
         const broadcasterResult = new BroadcasterResult()
-
-        this.driver.connection.logger.logQuery(query, parameters, this)
-        this.broadcaster.broadcastBeforeQueryEvent(
-            broadcasterResult,
-            query,
-            parameters,
-        )
-
-        const queryStartTime = +new Date()
+        const queryStartTime = Date.now()
         let statement: any
+
         try {
             statement = databaseConnection.prepare(query)
             if (parameters) {
@@ -109,14 +114,14 @@ export class SqljsQueryRunner extends AbstractSqliteQueryRunner {
             // log slow queries if maxQueryExecution time is set
             const maxQueryExecutionTime =
                 this.driver.options.maxQueryExecutionTime
-            const queryEndTime = +new Date()
+            const queryEndTime = Date.now()
             const queryExecutionTime = queryEndTime - queryStartTime
 
             if (
                 maxQueryExecutionTime &&
                 queryExecutionTime > maxQueryExecutionTime
             )
-                this.driver.connection.logger.logQuerySlow(
+                this.driver.dataSource.logger.logQuerySlow(
                     queryExecutionTime,
                     query,
                     parameters,
@@ -161,7 +166,7 @@ export class SqljsQueryRunner extends AbstractSqliteQueryRunner {
                 statement.free()
             }
 
-            this.driver.connection.logger.logQueryError(
+            this.driver.dataSource.logger.logQueryError(
                 err,
                 query,
                 parameters,

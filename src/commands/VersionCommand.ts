@@ -1,4 +1,4 @@
-import * as yargs from "yargs"
+import type * as yargs from "yargs"
 import { exec } from "child_process"
 
 /**
@@ -9,24 +9,19 @@ export class VersionCommand implements yargs.CommandModule {
     describe = "Prints TypeORM version this project uses."
 
     async handler() {
-        const localNpmList = await VersionCommand.executeCommand(
-            "npm list --depth=0",
-        )
+        const localNpmList =
+            await VersionCommand.executeCommand("npm list --depth=0")
         const localMatches = localNpmList.match(/ typeorm@(.*)\n/)
-        const localNpmVersion = (
-            localMatches && localMatches[1] ? localMatches[1] : ""
-        )
-            .replace(/"invalid"/gi, "")
+        const localNpmVersion = (localMatches?.[1] ?? "")
+            .replaceAll(/"invalid"/gi, "")
             .trim()
 
         const globalNpmList = await VersionCommand.executeCommand(
             "npm list -g --depth=0",
         )
         const globalMatches = globalNpmList.match(/ typeorm@(.*)\n/)
-        const globalNpmVersion = (
-            globalMatches && globalMatches[1] ? globalMatches[1] : ""
-        )
-            .replace(/"invalid"/gi, "")
+        const globalNpmVersion = (globalMatches?.[1] ?? "")
+            .replaceAll(/"invalid"/gi, "")
             .trim()
 
         if (localNpmVersion) {

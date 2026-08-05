@@ -5,18 +5,18 @@ import { Album } from "./Album"
 import { Photo } from "./Photo"
 
 export const uppercase: ValueTransformer = {
-    to: (entityValue: string) => {},
+    to: () => {},
     from: (databaseValue: string) => databaseValue.toLocaleUpperCase(),
 }
 
 export const lowercase: ValueTransformer = {
-    to: (entityValue: string) => {},
+    to: () => {},
     from: (databaseValue: string) => databaseValue.toLocaleLowerCase(),
 }
 
 export const removeWhitespace: ValueTransformer = {
-    to: (entityValue: string) => {},
-    from: (databaseValue: string) => databaseValue.replace(/\s/g, ""),
+    to: () => {},
+    from: (databaseValue: string) => databaseValue.replaceAll(/\s/g, ""),
 }
 @ViewEntity({
     expression: (dataSource: DataSource) =>

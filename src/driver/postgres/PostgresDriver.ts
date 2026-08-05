@@ -1,46 +1,81 @@
-import { ObjectLiteral } from "../../common/ObjectLiteral"
-import { DataSource } from "../../data-source/DataSource"
+import type { ObjectLiteral } from "../../common/ObjectLiteral"
+import type { DataSource } from "../../data-source/DataSource"
+import { TypeORMError } from "../../error"
 import { ConnectionIsNotSetError } from "../../error/ConnectionIsNotSetError"
 import { DriverPackageNotInstalledError } from "../../error/DriverPackageNotInstalledError"
-import { ColumnMetadata } from "../../metadata/ColumnMetadata"
-import { EntityMetadata } from "../../metadata/EntityMetadata"
+import type { ColumnMetadata } from "../../metadata/ColumnMetadata"
+import type { EntityMetadata } from "../../metadata/EntityMetadata"
+import type { IndexMetadata } from "../../metadata/IndexMetadata"
 import { PlatformTools } from "../../platform/PlatformTools"
-import { QueryRunner } from "../../query-runner/QueryRunner"
+import type { QueryRunner } from "../../query-runner/QueryRunner"
+import type { TableIndexTypes } from "../../schema-builder/options/TableIndexTypes"
 import { RdbmsSchemaBuilder } from "../../schema-builder/RdbmsSchemaBuilder"
-import { TableColumn } from "../../schema-builder/table/TableColumn"
+import type { Table } from "../../schema-builder/table/Table"
+import type { TableColumn } from "../../schema-builder/table/TableColumn"
+import type { TableForeignKey } from "../../schema-builder/table/TableForeignKey"
+import type { TableIndex } from "../../schema-builder/table/TableIndex"
+import type { View } from "../../schema-builder/view/View"
 import { ApplyValueTransformers } from "../../util/ApplyValueTransformers"
 import { DateUtils } from "../../util/DateUtils"
-import { OrmUtils } from "../../util/OrmUtils"
-import { Driver } from "../Driver"
-import { ColumnType } from "../types/ColumnTypes"
-import { CteCapabilities } from "../types/CteCapabilities"
-import { DataTypeDefaults } from "../types/DataTypeDefaults"
-import { MappedColumnTypes } from "../types/MappedColumnTypes"
-import { ReplicationMode } from "../types/ReplicationMode"
-import { VersionUtils } from "../../util/VersionUtils"
-import { PostgresConnectionCredentialsOptions } from "./PostgresConnectionCredentialsOptions"
-import { PostgresConnectionOptions } from "./PostgresConnectionOptions"
-import { PostgresQueryRunner } from "./PostgresQueryRunner"
-import { DriverUtils } from "../DriverUtils"
-import { TypeORMError } from "../../error"
-import { Table } from "../../schema-builder/table/Table"
-import { View } from "../../schema-builder/view/View"
-import { TableForeignKey } from "../../schema-builder/table/TableForeignKey"
 import { InstanceChecker } from "../../util/InstanceChecker"
-import { UpsertType } from "../types/UpsertType"
+import { OrmUtils } from "../../util/OrmUtils"
+import { VersionUtils } from "../../util/VersionUtils"
+import type { Driver } from "../Driver"
+import { DriverUtils } from "../DriverUtils"
+import type { ColumnType } from "../types/ColumnTypes"
+import type { CteCapabilities } from "../types/CteCapabilities"
+import type { DataTypeDefaults } from "../types/DataTypeDefaults"
+import type { MappedColumnTypes } from "../types/MappedColumnTypes"
+import type { ReplicationMode } from "../types/ReplicationMode"
+import type { ReturningType } from "../types/ReturningType"
+import type { IsolationLevel } from "../types/IsolationLevel"
+import type { UpsertType } from "../types/UpsertType"
+import type { PostgresConnectionCredentialsOptions } from "./PostgresConnectionCredentialsOptions"
+import type { PostgresDataSourceOptions } from "./PostgresDataSourceOptions"
+import { PostgresQueryRunner } from "./PostgresQueryRunner"
 
 /**
  * Organizes communication with PostgreSQL DBMS.
  */
 export class PostgresDriver implements Driver {
     // -------------------------------------------------------------------------
+    // Static Properties
+    // -------------------------------------------------------------------------
+
+    /**
+     * Transaction isolation levels supported by this driver.
+     *
+     * @see https://www.postgresql.org/docs/current/transaction-iso.html
+     */
+    static readonly supportedIsolationLevels: IsolationLevel[] = [
+        "READ UNCOMMITTED",
+        "READ COMMITTED",
+        "REPEATABLE READ",
+        "SERIALIZABLE",
+    ]
+
+    // -------------------------------------------------------------------------
     // Public Properties
     // -------------------------------------------------------------------------
 
     /**
-     * Connection used by driver.
+     * DataSource used by the driver.
      */
-    connection: DataSource
+    dataSource: DataSource
+
+    /**
+     * Isolation levels supported by this driver.
+     */
+    supportedIsolationLevels = PostgresDriver.supportedIsolationLevels
+
+    /**
+     * DataSource used by the driver.
+     *
+     * @deprecated since 1.0.0. Use {@link dataSource} instance instead.
+     */
+    get connection(): DataSource {
+        return this.dataSource
+    }
 
     /**
      * Postgres underlying library.
@@ -68,12 +103,13 @@ export class PostgresDriver implements Driver {
     // -------------------------------------------------------------------------
 
     /**
-     * Connection options.
+     * DataSource options.
      */
-    options: PostgresConnectionOptions
+    options: PostgresDataSourceOptions
 
     /**
-     * Version of Postgres. Requires a SQL query to the DB, so it is not always set
+     * Version of Postgres. Requires a SQL query to the DB, so it is set on the first
+     * connection attempt.
      */
     version?: string
 
@@ -115,8 +151,7 @@ export class PostgresDriver implements Driver {
     /**
      * Gets list of supported column data types by a driver.
      *
-     * @see https://www.tutorialspoint.com/postgresql/postgresql_data_types.htm
-     * @see https://www.postgresql.org/docs/9.2/static/datatype.html
+     * @see https://www.postgresql.org/docs/current/datatype.html
      */
     supportedDataTypes: ColumnType[] = [
         "int",
@@ -168,22 +203,32 @@ export class PostgresDriver implements Driver {
         "cidr",
         "inet",
         "macaddr",
+        "macaddr8",
         "tsvector",
         "tsquery",
         "uuid",
         "xml",
         "json",
         "jsonb",
+        "jsonpath",
         "int4range",
         "int8range",
         "numrange",
         "tsrange",
         "tstzrange",
         "daterange",
+        "int4multirange",
+        "int8multirange",
+        "nummultirange",
+        "tsmultirange",
+        "tstzmultirange",
+        "datemultirange",
         "geometry",
         "geography",
         "cube",
         "ltree",
+        "vector",
+        "halfvec",
     ]
 
     /**
@@ -207,6 +252,8 @@ export class PostgresDriver implements Driver {
         "bit",
         "varbit",
         "bit varying",
+        "vector",
+        "halfvec",
     ]
 
     /**
@@ -258,6 +305,18 @@ export class PostgresDriver implements Driver {
     }
 
     /**
+     * Table indices supported
+     */
+    supportedIndexTypes: TableIndexTypes[] = [
+        "brin",
+        "btree",
+        "gin",
+        "gist",
+        "hash",
+        "spgist",
+    ]
+
+    /**
      * The prefix used for the parameters
      */
     parametersPrefix: string = "$"
@@ -278,6 +337,7 @@ export class PostgresDriver implements Driver {
 
     /**
      * Max length allowed by Postgres for aliases.
+     *
      * @see https://www.postgresql.org/docs/current/sql-syntax-lexical.html#SQL-SYNTAX-IDENTIFIERS
      */
     maxAliasLength = 63
@@ -295,13 +355,13 @@ export class PostgresDriver implements Driver {
     // Constructor
     // -------------------------------------------------------------------------
 
-    constructor(connection?: DataSource) {
-        if (!connection) {
+    constructor(dataSource?: DataSource) {
+        if (!dataSource) {
             return
         }
 
-        this.connection = connection
-        this.options = connection.options as PostgresConnectionOptions
+        this.dataSource = dataSource
+        this.options = dataSource.options as PostgresDataSourceOptions
         this.isReplicated = this.options.replication ? true : false
         if (this.options.useUTC) {
             process.env.PGTZ = "UTC"
@@ -351,62 +411,80 @@ export class PostgresDriver implements Driver {
             this.master = await this.createPool(this.options, this.options)
         }
 
-        if (!this.database || !this.searchSchema) {
-            const queryRunner = await this.createQueryRunner("master")
+        if (!this.version || !this.database || !this.searchSchema) {
+            const queryRunner = this.createQueryRunner("master")
 
-            if (!this.database) {
-                this.database = await queryRunner.getCurrentDatabase()
-            }
+            this.version ??= await queryRunner.getVersion()
 
-            if (!this.searchSchema) {
-                this.searchSchema = await queryRunner.getCurrentSchema()
-            }
+            this.database ??= await queryRunner.getCurrentDatabase()
+
+            this.searchSchema ??= await queryRunner.getCurrentSchema()
 
             await queryRunner.release()
         }
 
-        if (!this.schema) {
-            this.schema = this.searchSchema
-        }
+        this.schema ??= this.searchSchema
     }
 
     /**
      * Makes any action after connection (e.g. create extensions in Postgres driver).
      */
     async afterConnect(): Promise<void> {
-        const extensionsMetadata = await this.checkMetadataForExtensions()
         const [connection, release] = await this.obtainMasterConnection()
 
         const installExtensions =
             this.options.installExtensions === undefined ||
             this.options.installExtensions
-        if (installExtensions && extensionsMetadata.hasExtensions) {
-            await this.enableExtensions(extensionsMetadata, connection)
+        if (installExtensions) {
+            const extensionsMetadata = await this.checkMetadataForExtensions()
+            const extensionsToInstall = this.options.extensions
+            if (extensionsMetadata.hasExtensions)
+                await this.enableExtensions(extensionsMetadata, connection)
+
+            if (extensionsToInstall) {
+                const availableExtensions =
+                    await this.getAvailableExtensions(connection)
+
+                await this.enableCustomExtensions(
+                    availableExtensions,
+                    extensionsToInstall,
+                    connection,
+                )
+            }
         }
 
-        const results = (await this.executeQuery(
-            connection,
-            "SELECT version();",
-        )) as {
-            rows: {
-                version: string
-            }[]
-        }
-        const versionString = results.rows[0].version.replace(
-            /^PostgreSQL ([\d\.]+) .*$/,
-            "$1",
-        )
-        this.version = versionString
         this.isGeneratedColumnsSupported = VersionUtils.isGreaterOrEqual(
-            versionString,
+            this.version,
             "12.0",
         )
 
         await release()
     }
 
+    protected async getAvailableExtensions(connection: any) {
+        const availableExtensions = new Set<string>()
+        const { logger } = this.dataSource
+        try {
+            const result: any = await this.executeQuery(
+                connection,
+                `SELECT name FROM pg_available_extensions`,
+            )
+            if (result.rows && Array.isArray(result.rows)) {
+                result.rows.forEach((row: any) => {
+                    availableExtensions.add(row.name)
+                })
+            }
+        } catch (_) {
+            logger.log(
+                "warn",
+                "Could not retrieve available extensions. Extension installation may fail if extensions are not available.",
+            )
+        }
+        return availableExtensions
+    }
+
     protected async enableExtensions(extensionsMetadata: any, connection: any) {
-        const { logger } = this.connection
+        const { logger } = this.dataSource
 
         const {
             hasUuidColumns,
@@ -415,6 +493,7 @@ export class PostgresDriver implements Driver {
             hasCubeColumns,
             hasGeometryColumns,
             hasLtreeColumns,
+            hasVectorColumns,
             hasExclusionConstraints,
         } = extensionsMetadata
 
@@ -423,14 +502,14 @@ export class PostgresDriver implements Driver {
                 await this.executeQuery(
                     connection,
                     `CREATE EXTENSION IF NOT EXISTS "${
-                        this.options.uuidExtension || "uuid-ossp"
+                        this.options.uuidExtension ?? "uuid-ossp"
                     }"`,
                 )
             } catch (_) {
                 logger.log(
                     "warn",
                     `At least one of the entities has uuid column, but the '${
-                        this.options.uuidExtension || "uuid-ossp"
+                        this.options.uuidExtension ?? "uuid-ossp"
                     }' extension cannot be installed automatically. Please install it manually using superuser rights, or select another uuid extension.`,
                 )
             }
@@ -494,6 +573,18 @@ export class PostgresDriver implements Driver {
                     "At least one of the entities has a ltree column, but the 'ltree' extension cannot be installed automatically. Please install it manually using superuser rights",
                 )
             }
+        if (hasVectorColumns)
+            try {
+                await this.executeQuery(
+                    connection,
+                    `CREATE EXTENSION IF NOT EXISTS "vector"`,
+                )
+            } catch (_) {
+                logger.log(
+                    "warn",
+                    "At least one of the entities has a vector column, but the 'vector' extension (pgvector) cannot be installed automatically. Please install it manually using superuser rights",
+                )
+            }
         if (hasExclusionConstraints)
             try {
                 // The btree_gist extension provides operator support in PostgreSQL exclusion constraints
@@ -509,8 +600,37 @@ export class PostgresDriver implements Driver {
             }
     }
 
+    protected async enableCustomExtensions(
+        availableExtensions: Set<string>,
+        extensionsToInstall: string[],
+        connection: any,
+    ) {
+        if (!extensionsToInstall) return
+        const logger = this.dataSource.logger
+        for (const extension of extensionsToInstall) {
+            if (availableExtensions.has(extension)) {
+                try {
+                    await this.executeQuery(
+                        connection,
+                        `CREATE EXTENSION IF NOT EXISTS "${extension}"`,
+                    )
+                } catch (_) {
+                    logger.log(
+                        "warn",
+                        `The extension "${extension}" cannot be installed automatically. Please install it manually using superuser rights`,
+                    )
+                }
+            } else {
+                logger.log(
+                    "warn",
+                    `The extension "${extension}" is not available on this database. Please install it manually using superuser rights`,
+                )
+            }
+        }
+    }
+
     protected async checkMetadataForExtensions() {
-        const hasUuidColumns = this.connection.entityMetadatas.some(
+        const hasUuidColumns = this.dataSource.entityMetadatas.some(
             (metadata) => {
                 return (
                     metadata.generatedColumns.filter(
@@ -519,7 +639,7 @@ export class PostgresDriver implements Driver {
                 )
             },
         )
-        const hasCitextColumns = this.connection.entityMetadatas.some(
+        const hasCitextColumns = this.dataSource.entityMetadatas.some(
             (metadata) => {
                 return (
                     metadata.columns.filter(
@@ -528,7 +648,7 @@ export class PostgresDriver implements Driver {
                 )
             },
         )
-        const hasHstoreColumns = this.connection.entityMetadatas.some(
+        const hasHstoreColumns = this.dataSource.entityMetadatas.some(
             (metadata) => {
                 return (
                     metadata.columns.filter(
@@ -537,7 +657,7 @@ export class PostgresDriver implements Driver {
                 )
             },
         )
-        const hasCubeColumns = this.connection.entityMetadatas.some(
+        const hasCubeColumns = this.dataSource.entityMetadatas.some(
             (metadata) => {
                 return (
                     metadata.columns.filter((column) => column.type === "cube")
@@ -545,7 +665,7 @@ export class PostgresDriver implements Driver {
                 )
             },
         )
-        const hasGeometryColumns = this.connection.entityMetadatas.some(
+        const hasGeometryColumns = this.dataSource.entityMetadatas.some(
             (metadata) => {
                 return (
                     metadata.columns.filter(
@@ -554,7 +674,7 @@ export class PostgresDriver implements Driver {
                 )
             },
         )
-        const hasLtreeColumns = this.connection.entityMetadatas.some(
+        const hasLtreeColumns = this.dataSource.entityMetadatas.some(
             (metadata) => {
                 return (
                     metadata.columns.filter((column) => column.type === "ltree")
@@ -562,7 +682,15 @@ export class PostgresDriver implements Driver {
                 )
             },
         )
-        const hasExclusionConstraints = this.connection.entityMetadatas.some(
+        const hasVectorColumns = this.dataSource.entityMetadatas.some(
+            (metadata) => {
+                return metadata.columns.some(
+                    (column) =>
+                        column.type === "vector" || column.type === "halfvec",
+                )
+            },
+        )
+        const hasExclusionConstraints = this.dataSource.entityMetadatas.some(
             (metadata) => {
                 return metadata.exclusions.length > 0
             },
@@ -575,6 +703,7 @@ export class PostgresDriver implements Driver {
             hasCubeColumns,
             hasGeometryColumns,
             hasLtreeColumns,
+            hasVectorColumns,
             hasExclusionConstraints,
             hasExtensions:
                 hasUuidColumns ||
@@ -583,6 +712,7 @@ export class PostgresDriver implements Driver {
                 hasGeometryColumns ||
                 hasCubeColumns ||
                 hasLtreeColumns ||
+                hasVectorColumns ||
                 hasExclusionConstraints,
         }
     }
@@ -591,8 +721,9 @@ export class PostgresDriver implements Driver {
      * Closes connection with database.
      */
     async disconnect(): Promise<void> {
-        if (!this.master)
-            return Promise.reject(new ConnectionIsNotSetError("postgres"))
+        if (!this.master) {
+            throw new ConnectionIsNotSetError("postgres")
+        }
 
         await this.closePool(this.master)
         await Promise.all(this.slaves.map((slave) => this.closePool(slave)))
@@ -604,18 +735,23 @@ export class PostgresDriver implements Driver {
      * Creates a schema builder used to build and sync a schema.
      */
     createSchemaBuilder() {
-        return new RdbmsSchemaBuilder(this.connection)
+        return new RdbmsSchemaBuilder(this.dataSource)
     }
 
     /**
      * Creates a query runner used to execute database queries.
+     *
+     * @param mode
      */
-    createQueryRunner(mode: ReplicationMode): QueryRunner {
+    createQueryRunner(mode: ReplicationMode): PostgresQueryRunner {
         return new PostgresQueryRunner(this, mode)
     }
 
     /**
      * Prepares given value to a value to be persisted, based on its column type and metadata.
+     *
+     * @param value
+     * @param columnMetadata
      */
     preparePersistentValue(value: any, columnMetadata: ColumnMetadata): any {
         if (columnMetadata.transformer)
@@ -629,23 +765,54 @@ export class PostgresDriver implements Driver {
         if (columnMetadata.type === Boolean) {
             return value === true ? 1 : 0
         } else if (columnMetadata.type === "date") {
-            return DateUtils.mixedDateToDateString(value)
+            return DateUtils.mixedDateToDateString(value, {
+                utc: columnMetadata.utc,
+            })
         } else if (columnMetadata.type === "time") {
             return DateUtils.mixedDateToTimeString(value)
         } else if (
             columnMetadata.type === "datetime" ||
             columnMetadata.type === Date ||
             columnMetadata.type === "timestamp" ||
+            columnMetadata.type === "timestamptz" ||
             columnMetadata.type === "timestamp with time zone" ||
             columnMetadata.type === "timestamp without time zone"
         ) {
             return DateUtils.mixedDateToDate(value)
+        } else if (columnMetadata.type === "point") {
+            if (
+                typeof value === "object" &&
+                value.x !== undefined &&
+                value.y !== undefined
+            ) {
+                return `(${value.x},${value.y})`
+            }
+            return value
+        } else if (columnMetadata.type === "circle") {
+            if (
+                typeof value === "object" &&
+                value.x !== undefined &&
+                value.y !== undefined &&
+                value.radius !== undefined
+            ) {
+                return `<(${value.x},${value.y}),${value.radius}>`
+            }
+            return value
         } else if (
             ["json", "jsonb", ...this.spatialTypes].indexOf(
                 columnMetadata.type,
             ) >= 0
         ) {
             return JSON.stringify(value)
+        } else if (
+            columnMetadata.type === "vector" ||
+            columnMetadata.type === "halfvec"
+        ) {
+            if (Array.isArray(value)) {
+                return `[${value.join(",")}]`
+            } else {
+                return value
+            }
         } else if (columnMetadata.type === "hstore") {
             if (typeof value === "string") {
                 return value
@@ -659,7 +826,7 @@ export class PostgresDriver implements Driver {
                     }
                     // Convert non-null values to string since HStore only stores strings anyway.
                     // To include a double quote or a backslash in a key or value, escape it with a backslash.
-                    return `"${`${value}`.replace(/(?=["\\])/g, "\\")}"`
+                    return `"${`${value}`.replaceAll(/(?=["\\])/g, "\\")}"`
                 }
                 return Object.keys(value)
                     .map(
@@ -684,7 +851,7 @@ export class PostgresDriver implements Driver {
                 .split(".")
                 .filter(Boolean)
                 .join(".")
-                .replace(/[\s]+/g, "_")
+                .replaceAll(/[\s]+/g, "_")
         } else if (
             (columnMetadata.type === "enum" ||
                 columnMetadata.type === "simple-enum") &&
@@ -698,6 +865,9 @@ export class PostgresDriver implements Driver {
 
     /**
      * Prepares given value to a value to be persisted, based on its column type or metadata.
+     *
+     * @param value
+     * @param columnMetadata
      */
     prepareHydratedValue(value: any, columnMetadata: ColumnMetadata): any {
         if (value === null || value === undefined)
@@ -714,22 +884,37 @@ export class PostgresDriver implements Driver {
             columnMetadata.type === "datetime" ||
             columnMetadata.type === Date ||
             columnMetadata.type === "timestamp" ||
+            columnMetadata.type === "timestamptz" ||
             columnMetadata.type === "timestamp with time zone" ||
             columnMetadata.type === "timestamp without time zone"
         ) {
             value = DateUtils.normalizeHydratedDate(value)
         } else if (columnMetadata.type === "date") {
-            value = DateUtils.mixedDateToDateString(value)
+            value = DateUtils.mixedDateToDateString(value, {
+                utc: columnMetadata.utc,
+            })
         } else if (columnMetadata.type === "time") {
             value = DateUtils.mixedTimeToString(value)
+        } else if (
+            columnMetadata.type === "vector" ||
+            columnMetadata.type === "halfvec"
+        ) {
+            if (
+                typeof value === "string" &&
+                value.startsWith("[") &&
+                value.endsWith("]")
+            ) {
+                if (value === "[]") return []
+                return value.slice(1, -1).split(",").map(Number)
+            }
         } else if (columnMetadata.type === "hstore") {
             if (columnMetadata.hstoreType === "object") {
                 const unescapeString = (str: string) =>
-                    str.replace(/\\./g, (m) => m[1])
+                    str.replaceAll(/\\./g, (m) => m[1])
                 const regexp =
                     /"([^"\\]*(?:\\.[^"\\]*)*)"=>(?:(NULL)|"([^"\\]*(?:\\.[^"\\]*)*)")(?:,|$)/g
                 const object: ObjectLiteral = {}
-                ;`${value}`.replace(
+                ;`${value}`.replaceAll(
                     regexp,
                     (_, key, nullValue, stringValue) => {
                         object[unescapeString(key)] = nullValue
@@ -745,7 +930,7 @@ export class PostgresDriver implements Driver {
         } else if (columnMetadata.type === "simple-json") {
             value = DateUtils.stringToSimpleJson(value)
         } else if (columnMetadata.type === "cube") {
-            value = value.replace(/[\(\)\s]+/g, "") // remove whitespace
+            value = value.replaceAll(/[()\s]+/g, "") // remove whitespace
             if (columnMetadata.isArray) {
                 /**
                  * Strips these groups from `{"1,2,3","",NULL}`:
@@ -753,11 +938,11 @@ export class PostgresDriver implements Driver {
                  * 2. ["", undefined]         <- cube of arity 0
                  * 3. [undefined, "NULL"]     <- NULL
                  */
-                const regexp = /(?:\"((?:[\d\s\.,])*)\")|(?:(NULL))/g
+                const regexp = /(?:"((?:[\d\s.,])*)")|(?:(NULL))/g
                 const unparsedArrayString = value
 
                 value = []
-                let cube: RegExpExecArray | null = null
+                let cube: RegExpExecArray | null
                 // Iterate through all regexp matches for cubes/null in array
                 while ((cube = regexp.exec(unparsedArrayString)) !== null) {
                     if (cube[1] !== undefined) {
@@ -780,16 +965,14 @@ export class PostgresDriver implements Driver {
 
                 // manually convert enum array to array of values (pg does not support, see https://github.com/brianc/node-pg-types/issues/56)
                 value = (value as string)
-                    .substr(1, (value as string).length - 2)
+                    .slice(1, -1)
                     .split(",")
                     .map((val) => {
                         // replace double quotes from the beginning and from the end
                         if (val.startsWith(`"`) && val.endsWith(`"`))
                             val = val.slice(1, -1)
-                        // replace double escaped backslash to single escaped e.g. \\\\ -> \\
-                        val = val.replace(/(\\\\)/g, "\\")
-                        // replace escaped double quotes to non-escaped e.g. \"asd\" -> "asd"
-                        return val.replace(/(\\")/g, '"')
+                        // replace escaped backslash and double quotes
+                        return val.replaceAll(/\\(\\|")/g, "$1")
                     })
 
                 // convert to number if that exists in possible enum options
@@ -823,20 +1006,20 @@ export class PostgresDriver implements Driver {
     /**
      * Replaces parameters in the given sql with special escaping character
      * and an array of parameter names to be passed to a query.
+     *
+     * @param sql
+     * @param parameters
      */
     escapeQueryWithParameters(
         sql: string,
         parameters: ObjectLiteral,
-        nativeParameters: ObjectLiteral,
     ): [string, any[]] {
-        const escapedParameters: any[] = Object.keys(nativeParameters).map(
-            (key) => nativeParameters[key],
-        )
+        const escapedParameters: any[] = []
         if (!parameters || !Object.keys(parameters).length)
             return [sql, escapedParameters]
 
         const parameterIndexMap = new Map<string, number>()
-        sql = sql.replace(
+        sql = sql.replaceAll(
             /:(\.\.\.)?([A-Za-z0-9_.]+)/g,
             (full, isArray: string, key: string): string => {
                 if (!parameters.hasOwnProperty(key)) {
@@ -847,7 +1030,7 @@ export class PostgresDriver implements Driver {
                     return this.parametersPrefix + parameterIndexMap.get(key)
                 }
 
-                let value: any = parameters[key]
+                const value: any = parameters[key]
 
                 if (isArray) {
                     return value
@@ -875,17 +1058,22 @@ export class PostgresDriver implements Driver {
 
     /**
      * Escapes a column name.
+     *
+     * @param columnName
      */
     escape(columnName: string): string {
-        return '"' + columnName + '"'
+        return `"${columnName.replaceAll('"', '""')}"`
     }
 
     /**
      * Build full table name with schema name and table name.
      * E.g. myDB.mySchema.myTable
+     *
+     * @param tableName
+     * @param schema
      */
     buildTableName(tableName: string, schema?: string): string {
-        let tablePath = [tableName]
+        const tablePath = [tableName]
 
         if (schema) {
             tablePath.unshift(schema)
@@ -896,6 +1084,8 @@ export class PostgresDriver implements Driver {
 
     /**
      * Parse a target table name or other types and return a normalized table definition.
+     *
+     * @param target
      */
     parseTableName(
         target: EntityMetadata | Table | View | TableForeignKey | string,
@@ -907,8 +1097,8 @@ export class PostgresDriver implements Driver {
             const parsed = this.parseTableName(target.name)
 
             return {
-                database: target.database || parsed.database || driverDatabase,
-                schema: target.schema || parsed.schema || driverSchema,
+                database: target.database ?? parsed.database ?? driverDatabase,
+                schema: target.schema ?? parsed.schema ?? driverSchema,
                 tableName: parsed.tableName,
             }
         }
@@ -918,11 +1108,11 @@ export class PostgresDriver implements Driver {
 
             return {
                 database:
-                    target.referencedDatabase ||
-                    parsed.database ||
+                    target.referencedDatabase ??
+                    parsed.database ??
                     driverDatabase,
                 schema:
-                    target.referencedSchema || parsed.schema || driverSchema,
+                    target.referencedSchema ?? parsed.schema ?? driverSchema,
                 tableName: parsed.tableName,
             }
         }
@@ -931,8 +1121,8 @@ export class PostgresDriver implements Driver {
             // EntityMetadata tableName is never a path
 
             return {
-                database: target.database || driverDatabase,
-                schema: target.schema || driverSchema,
+                database: target.database ?? driverDatabase,
+                schema: target.schema ?? driverSchema,
                 tableName: target.tableName,
             }
         }
@@ -941,13 +1131,20 @@ export class PostgresDriver implements Driver {
 
         return {
             database: driverDatabase,
-            schema: (parts.length > 1 ? parts[0] : undefined) || driverSchema,
+            schema: (parts.length > 1 ? parts[0] : undefined) ?? driverSchema,
             tableName: parts.length > 1 ? parts[1] : parts[0],
         }
     }
 
     /**
      * Creates a database type from a given column metadata.
+     *
+     * @param column
+     * @param column.type
+     * @param column.length
+     * @param column.precision
+     * @param column.scale
+     * @param column.isArray
      */
     normalizeType(column: {
         type?: ColumnType
@@ -1001,6 +1198,8 @@ export class PostgresDriver implements Driver {
 
     /**
      * Normalizes "default" value of the column.
+     *
+     * @param columnMetadata
      */
     normalizeDefault(columnMetadata: ColumnMetadata): string | undefined {
         const defaultValue = columnMetadata.default
@@ -1010,9 +1209,7 @@ export class PostgresDriver implements Driver {
         }
 
         if (columnMetadata.isArray && Array.isArray(defaultValue)) {
-            return `'{${defaultValue
-                .map((val: string) => `${val}`)
-                .join(",")}}'`
+            return `'{${defaultValue.map((val) => String(val)).join(",")}}'`
         }
 
         if (
@@ -1036,7 +1233,7 @@ export class PostgresDriver implements Driver {
         }
 
         if (typeof defaultValue === "object") {
-            return `'${JSON.stringify(defaultValue)}'`
+            return `'${JSON.stringify(defaultValue).replaceAll("'", "''")}'`
         }
 
         return `${defaultValue}`
@@ -1044,30 +1241,27 @@ export class PostgresDriver implements Driver {
 
     /**
      * Compares "default" value of the column.
-     * Postgres sorts json values before it is saved, so in that case a deep comparison has to be performed to see if has changed.
+     *
+     * @param columnMetadata
+     * @param tableColumn
      */
     private defaultEqual(
         columnMetadata: ColumnMetadata,
         tableColumn: TableColumn,
     ): boolean {
+        // defaults are equal if both are undefined or null
+        if (
+            (columnMetadata.default === null ||
+                columnMetadata.default === undefined) &&
+            (tableColumn.default === null || tableColumn.default === undefined)
+        )
+            return true
+
         if (
             ["json", "jsonb"].includes(columnMetadata.type as string) &&
             !["function", "undefined"].includes(typeof columnMetadata.default)
         ) {
-            const tableColumnDefault =
-                typeof tableColumn.default === "string"
-                    ? JSON.parse(
-                          tableColumn.default.substring(
-                              1,
-                              tableColumn.default.length - 1,
-                          ),
-                      )
-                    : tableColumn.default
-
-            return OrmUtils.deepCompare(
-                columnMetadata.default,
-                tableColumnDefault,
-            )
+            return this.compareJsonDefaults(columnMetadata, tableColumn)
         }
 
         const columnDefault = this.lowerDefaultValueIfNecessary(
@@ -1077,7 +1271,47 @@ export class PostgresDriver implements Driver {
     }
 
     /**
+     * Compares json/jsonb default values of the column.
+     *
+     * @param columnMetadata
+     * @param tableColumn
+     */
+    private compareJsonDefaults(
+        columnMetadata: ColumnMetadata,
+        tableColumn: TableColumn,
+    ): boolean {
+        let jsonString = tableColumn.default
+        if (typeof jsonString === "string") {
+            jsonString = jsonString.trim()
+            if (jsonString.startsWith("'") && jsonString.endsWith("'")) {
+                jsonString = jsonString.slice(1, -1).replaceAll("''", "'")
+            }
+        }
+
+        if (typeof jsonString === "string") {
+            try {
+                const tableColumnDefault = JSON.parse(jsonString)
+                return OrmUtils.deepCompare(
+                    columnMetadata.default,
+                    tableColumnDefault,
+                )
+            } catch (err) {
+                if (!(err instanceof SyntaxError)) {
+                    throw new TypeORMError(
+                        `Failed to compare default values of ${columnMetadata.propertyName} column`,
+                    )
+                }
+            }
+        } else {
+            return OrmUtils.deepCompare(columnMetadata.default, jsonString)
+        }
+        return false
+    }
+
+    /**
      * Normalizes "isUnique" value of the column.
+     *
+     * @param column
      */
     normalizeIsUnique(column: ColumnMetadata): boolean {
         return column.entityMetadata.uniques.some(
@@ -1087,6 +1321,8 @@ export class PostgresDriver implements Driver {
 
     /**
      * Returns default column lengths, which is required on column creation.
+     *
+     * @param column
      */
     getColumnLength(column: ColumnMetadata): string {
         return column.length ? column.length.toString() : ""
@@ -1094,6 +1330,8 @@ export class PostgresDriver implements Driver {
 
     /**
      * Creates column type definition including length, precision and scale
+     *
+     * @param column
      */
     createFullType(column: TableColumn): string {
         let type = column.type
@@ -1148,6 +1386,9 @@ export class PostgresDriver implements Driver {
             } else {
                 type = column.type
             }
+        } else if (column.type === "vector" || column.type === "halfvec") {
+            type =
+                column.type + (column.length ? "(" + column.length + ")" : "")
         }
 
         if (column.isArray) type += " array"
@@ -1167,7 +1408,11 @@ export class PostgresDriver implements Driver {
 
         return new Promise((ok, fail) => {
             this.master.connect((err: any, connection: any, release: any) => {
-                err ? fail(err) : ok([connection, release])
+                if (err) {
+                    fail(err)
+                } else {
+                    ok([connection, release])
+                }
             })
         })
     }
@@ -1187,7 +1432,11 @@ export class PostgresDriver implements Driver {
         return new Promise((ok, fail) => {
             this.slaves[random].connect(
                 (err: any, connection: any, release: any) => {
-                    err ? fail(err) : ok([connection, release])
+                    if (err) {
+                        fail(err)
+                    } else {
+                        ok([connection, release])
+                    }
                 },
             )
         })
@@ -1197,6 +1446,9 @@ export class PostgresDriver implements Driver {
      * Creates generated map of values generated or returned by database after INSERT query.
      *
      * todo: slow. optimize Object.keys(), OrmUtils.mergeDeep and column.createValueMap parts
+     *
+     * @param metadata
+     * @param insertResult
      */
     createGeneratedMap(metadata: EntityMetadata, insertResult: ObjectLiteral) {
         if (!insertResult) return undefined
@@ -1217,6 +1469,9 @@ export class PostgresDriver implements Driver {
     /**
      * Differentiate columns of this table and columns from the given column metadatas columns
      * and returns only changed.
+     *
+     * @param tableColumns
+     * @param columnMetadatas
      */
     findChangedColumns(
         tableColumns: TableColumn[],
@@ -1245,19 +1500,22 @@ export class PostgresDriver implements Driver {
                 tableColumn.isUnique !==
                     this.normalizeIsUnique(columnMetadata) ||
                 tableColumn.enumName !== columnMetadata.enumName ||
-                (tableColumn.enum &&
+                !!(
+                    tableColumn.enum &&
                     columnMetadata.enum &&
                     !OrmUtils.isArraysEqual(
                         tableColumn.enum,
                         columnMetadata.enum.map((val) => val + ""),
-                    )) || // enums in postgres are always strings
+                    )
+                ) || // enums in postgres are always strings
                 tableColumn.isGenerated !== columnMetadata.isGenerated ||
-                (tableColumn.spatialFeatureType || "").toLowerCase() !==
-                    (columnMetadata.spatialFeatureType || "").toLowerCase() ||
+                (tableColumn.spatialFeatureType ?? "").toLowerCase() !==
+                    (columnMetadata.spatialFeatureType ?? "").toLowerCase() ||
                 tableColumn.srid !== columnMetadata.srid ||
                 tableColumn.generatedType !== columnMetadata.generatedType ||
-                (tableColumn.asExpression || "").trim() !==
-                    (columnMetadata.asExpression || "").trim()
+                (tableColumn.asExpression ?? "").trim() !==
+                    (columnMetadata.asExpression ?? "").trim() ||
+                tableColumn.collation !== columnMetadata.collation
 
             // DEBUG SECTION
             // if (isColumnChanged) {
@@ -1377,8 +1635,10 @@ export class PostgresDriver implements Driver {
 
     /**
      * Returns true if driver supports RETURNING / OUTPUT statement.
+     *
+     * @param _returningType
      */
-    isReturningSqlSupported(): boolean {
+    isReturningSqlSupported(_returningType: ReturningType): boolean {
         return true
     }
 
@@ -1404,9 +1664,19 @@ export class PostgresDriver implements Driver {
 
     /**
      * Creates an escaped parameter.
+     *
+     * @param parameterName
+     * @param index
      */
     createParameter(parameterName: string, index: number): string {
         return this.parametersPrefix + (index + 1)
+    }
+
+    compareTableIndexTypes = (indexA: IndexMetadata, indexB: TableIndex) => {
+        const normalizedA = indexA.isSpatial ? "gist" : (indexA.type ?? "btree")
+        const normalizedB = indexB.isSpatial ? "gist" : (indexB.type ?? "btree")
+
+        return normalizedA.toLowerCase() === normalizedB.toLowerCase()
     }
 
     // -------------------------------------------------------------------------
@@ -1419,10 +1689,10 @@ export class PostgresDriver implements Driver {
     loadStreamDependency() {
         try {
             return PlatformTools.load("pg-query-stream")
-        } catch (e) {
+        } catch {
             // todo: better error for browser env
             throw new TypeORMError(
-                `To use streams you should install pg-query-stream package. Please run npm i pg-query-stream --save command.`,
+                `To use streams you should install pg-query-stream package. Please run "npm i pg-query-stream".`,
             )
         }
     }
@@ -1436,11 +1706,11 @@ export class PostgresDriver implements Driver {
      */
     protected loadDependencies(): void {
         try {
-            const postgres = this.options.driver || PlatformTools.load("pg")
+            const postgres = this.options.driver ?? PlatformTools.load("pg")
             this.postgres = postgres
             try {
                 const pgNative =
-                    this.options.nativeDriver || PlatformTools.load("pg-native")
+                    this.options.nativeDriver ?? PlatformTools.load("pg-native")
                 if (pgNative && this.postgres.native)
                     this.postgres = this.postgres.native
             } catch (e) {}
@@ -1452,12 +1722,15 @@ export class PostgresDriver implements Driver {
 
     /**
      * Creates a new connection pool for a given database credentials.
+     *
+     * @param options
+     * @param credentials
      */
     protected async createPool(
-        options: PostgresConnectionOptions,
+        options: PostgresDataSourceOptions,
         credentials: PostgresConnectionCredentialsOptions,
     ): Promise<any> {
-        const { logger } = this.connection
+        const { logger } = this.dataSource
         credentials = Object.assign({}, credentials)
 
         // build connection options for the driver
@@ -1477,7 +1750,7 @@ export class PostgresDriver implements Driver {
                     options.applicationName ?? credentials.applicationName,
                 max: options.poolSize,
             },
-            options.extra || {},
+            options.extra ?? {},
         )
 
         if (options.parseInt8 !== undefined) {
@@ -1501,7 +1774,7 @@ export class PostgresDriver implements Driver {
         const pool = new this.postgres.Pool(connectionOptions)
 
         const poolErrorHandler =
-            options.poolErrorHandler ||
+            options.poolErrorHandler ??
             ((error: any) =>
                 logger.log("warn", `Postgres pool raised an error. ${error}`))
 
@@ -1517,14 +1790,17 @@ export class PostgresDriver implements Driver {
 
                 if (options.logNotifications) {
                     connection.on("notice", (msg: any) => {
-                        msg && this.connection.logger.log("info", msg.message)
+                        if (msg) {
+                            this.dataSource.logger.log("info", msg.message)
+                        }
                     })
                     connection.on("notification", (msg: any) => {
-                        msg &&
-                            this.connection.logger.log(
+                        if (msg) {
+                            this.dataSource.logger.log(
                                 "info",
                                 `Received NOTIFY on channel ${msg.channel}: ${msg.payload}.`,
                             )
+                        }
                     })
                 }
                 release()
@@ -1535,6 +1811,8 @@ export class PostgresDriver implements Driver {
 
     /**
      * Closes connection pool.
+     *
+     * @param pool
      */
     protected async closePool(pool: any): Promise<void> {
         while (this.connectedQueryRunners.length) {
@@ -1548,9 +1826,12 @@ export class PostgresDriver implements Driver {
 
     /**
      * Executes given query.
+     *
+     * @param connection
+     * @param query
      */
     protected executeQuery(connection: any, query: string) {
-        this.connection.logger.logQuery(query)
+        this.dataSource.logger.logQuery(query)
 
         return new Promise((ok, fail) => {
             connection.query(query, (err: any, result: any) =>
@@ -1562,52 +1843,50 @@ export class PostgresDriver implements Driver {
     /**
      * If parameter is a datetime function, e.g. "CURRENT_TIMESTAMP", normalizes it.
      * Otherwise returns original input.
+     *
+     * @param value
      */
     protected normalizeDatetimeFunction(value: string) {
-        // check if input is datetime function
-        const upperCaseValue = value.toUpperCase()
-        const isDatetimeFunction =
-            upperCaseValue.indexOf("CURRENT_TIMESTAMP") !== -1 ||
-            upperCaseValue.indexOf("CURRENT_DATE") !== -1 ||
-            upperCaseValue.indexOf("CURRENT_TIME") !== -1 ||
-            upperCaseValue.indexOf("LOCALTIMESTAMP") !== -1 ||
-            upperCaseValue.indexOf("LOCALTIME") !== -1
+        const match = value
+            .trim()
+            .toUpperCase()
+            .match(
+                /^(CURRENT_TIMESTAMP|CURRENT_DATE|CURRENT_TIME|LOCALTIMESTAMP|LOCALTIME)(\(\d+\))?$/,
+            )
 
-        if (isDatetimeFunction) {
-            // extract precision, e.g. "(3)"
-            const precision = value.match(/\(\d+\)/)
+        if (!match) return value
 
-            if (upperCaseValue.indexOf("CURRENT_TIMESTAMP") !== -1) {
+        const [, funcName, precision = ""] = match
+
+        const prefix = "('now'::text)"
+
+        switch (funcName) {
+            case "CURRENT_TIMESTAMP":
                 return precision
-                    ? `('now'::text)::timestamp${precision[0]} with time zone`
+                    ? `${prefix}::timestamp${precision} with time zone`
                     : "now()"
-            } else if (upperCaseValue === "CURRENT_DATE") {
-                return "('now'::text)::date"
-            } else if (upperCaseValue.indexOf("CURRENT_TIME") !== -1) {
-                return precision
-                    ? `('now'::text)::time${precision[0]} with time zone`
-                    : "('now'::text)::time with time zone"
-            } else if (upperCaseValue.indexOf("LOCALTIMESTAMP") !== -1) {
-                return precision
-                    ? `('now'::text)::timestamp${precision[0]} without time zone`
-                    : "('now'::text)::timestamp without time zone"
-            } else if (upperCaseValue.indexOf("LOCALTIME") !== -1) {
-                return precision
-                    ? `('now'::text)::time${precision[0]} without time zone`
-                    : "('now'::text)::time without time zone"
-            }
+            case "CURRENT_DATE":
+                return `${prefix}::date`
+            case "CURRENT_TIME":
+                return `${prefix}::time${precision} with time zone`
+            case "LOCALTIMESTAMP":
+                return `${prefix}::timestamp${precision} without time zone`
+            case "LOCALTIME":
+                return `${prefix}::time${precision} without time zone`
+            default:
+                return value
         }
-
-        return value
     }
 
     /**
      * Escapes a given comment.
+     *
+     * @param comment
      */
     protected escapeComment(comment?: string) {
         if (!comment) return comment
 
-        comment = comment.replace(/\u0000/g, "") // Null bytes aren't allowed in comments
+        comment = comment.replaceAll("\u0000", "") // Null bytes aren't allowed in comments
 
         return comment
     }

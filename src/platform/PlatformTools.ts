@@ -1,11 +1,14 @@
-import * as path from "path"
-import * as fs from "fs"
-import dotenv from "dotenv"
-import chalk from "chalk"
-import { highlight, Theme } from "cli-highlight"
+import { format as sqlFormat } from "@sqltools/formatter"
+import { type Config as SqlFormatterConfig } from "@sqltools/formatter/lib/core/types"
+import ansi from "ansis"
+import crypto from "crypto"
+import fs from "fs"
+import path from "path"
+import { highlight } from "sql-highlight"
+import { type DatabaseType } from "../driver/types/DatabaseType"
 
-export { ReadStream } from "fs"
 export { EventEmitter } from "events"
+export { ReadStream } from "fs"
 export { Readable, Writable } from "stream"
 
 /**
@@ -18,142 +21,105 @@ export class PlatformTools {
     static type: "browser" | "node" = "node"
 
     /**
-     * Gets global variable where global stuff can be stored.
+     * @returns the platform-specific global variable
      */
     static getGlobalVariable(): any {
+        if (typeof globalThis !== "undefined") {
+            return globalThis
+        }
         return global
     }
 
     /**
      * Loads ("require"-s) given file or package.
-     * This operation only supports on node platform
+     * This operation is only supported on the NodeJS platform
+     *
+     * @param name name of the module to be imported
+     * @returns the module
      */
     static load(name: string): any {
+        const KNOWN_MODULES = [
+            // AWS Aurora Data API (PostgreSQL/MySQL)
+            "typeorm-aurora-data-api-driver",
+            // better-sqlite3
+            "better-sqlite3",
+            // Expo
+            "expo-sqlite",
+            // Google Cloud Spanner
+            "@google-cloud/spanner",
+            // Microsoft SQL Server
+            "mssql",
+            // MongoDB
+            "mongodb",
+            // MySQL / MariaDB
+            "mysql2",
+            // Oracle
+            "oracledb",
+            // PostgreSQL
+            "pg",
+            "pg-native",
+            "pg-query-stream",
+            // React Native
+            "react-native-sqlite-storage",
+            // SAP HANA
+            "@sap/hana-client",
+            "@sap/hana-client/extension/Stream",
+            // sql.js
+            "sql.js",
+            // redis
+            "redis",
+            "ioredis",
+        ]
+
+        if (!KNOWN_MODULES.includes(name)) {
+            throw new TypeError(
+                `Invalid Package for PlatformTools.load: ${name}`,
+            )
+        }
+
         // if name is not absolute or relative, then try to load package from the node_modules of the directory we are currently in
         // this is useful when we are using typeorm package globally installed and it accesses drivers
         // that are not installed globally
-
         try {
-            // switch case to explicit require statements for webpack compatibility.
-            switch (name) {
-                /**
-                 * spanner
-                 */
-                case "spanner":
-                    return require("@google-cloud/spanner")
-
-                /**
-                 * mongodb
-                 */
-                case "mongodb":
-                    return require("mongodb")
-
-                /**
-                 * hana
-                 */
-                case "@sap/hana-client":
-                    return require("@sap/hana-client")
-
-                case "@sap/hana-client/extension/Stream":
-                    return require("@sap/hana-client/extension/Stream")
-
-                case "hdb-pool":
-                    return require("hdb-pool")
-
-                /**
-                 * mysql
-                 */
-                case "mysql":
-                    return require("mysql")
-
-                case "mysql2":
-                    return require("mysql2")
-
-                /**
-                 * oracle
-                 */
-                case "oracledb":
-                    return require("oracledb")
-
-                /**
-                 * postgres
-                 */
-                case "pg":
-                    return require("pg")
-
-                case "pg-native":
-                    return require("pg-native")
-
-                case "pg-query-stream":
-                    return require("pg-query-stream")
-
-                case "typeorm-aurora-data-api-driver":
-                    return require("typeorm-aurora-data-api-driver")
-
-                /**
-                 * redis
-                 */
-                case "redis":
-                    return require("redis")
-
-                case "ioredis":
-                    return require("ioredis")
-
-                /**
-                 * better-sqlite3
-                 */
-                case "better-sqlite3":
-                    return require("better-sqlite3")
-
-                /**
-                 * sqlite
-                 */
-                case "sqlite3":
-                    return require("sqlite3")
-
-                /**
-                 * sql.js
-                 */
-                case "sql.js":
-                    return require("sql.js")
-
-                /**
-                 * sqlserver
-                 */
-                case "mssql":
-                    return require("mssql")
-
-                /**
-                 * react-native-sqlite
-                 */
-                case "react-native-sqlite-storage":
-                    return require("react-native-sqlite-storage")
-            }
-        } catch (err) {
-            return require(path.resolve(
-                process.cwd() + "/node_modules/" + name,
-            ))
+            // eslint-disable-next-line @typescript-eslint/no-require-imports
+            return require(name)
+        } catch {
+            // eslint-disable-next-line @typescript-eslint/no-require-imports
+            return require(
+                path.resolve(process.cwd() + "/node_modules/" + name),
+            )
         }
+    }
 
-        // If nothing above matched and we get here, the package was not listed within PlatformTools
-        // and is an Invalid Package.  To make it explicit that this is NOT the intended use case for
-        // PlatformTools.load - it's not just a way to replace `require` all willy-nilly - let's throw
-        // an error.
-        throw new TypeError(`Invalid Package for PlatformTools.load: ${name}`)
+    /**
+     * Returns a SHA-1 hex digest for internal IDs/aliases (not for cryptographic security)
+     *
+     * @param input string to encode
+     * @returns the SHA-1 digest of the input string
+     */
+    static sha1(input: string): string {
+        const hashFunction = crypto.createHash("sha1")
+        hashFunction.update(input, "utf8")
+
+        return hashFunction.digest("hex")
     }
 
     /**
      * Normalizes given path. Does "path.normalize" and replaces backslashes with forward slashes on Windows.
+     *
+     * @param pathStr
      */
     static pathNormalize(pathStr: string): string {
         let normalizedPath = path.normalize(pathStr)
         if (process.platform === "win32")
-            normalizedPath = normalizedPath.replace(/\\/g, "/")
+            normalizedPath = normalizedPath.replaceAll("\\", "/")
         return normalizedPath
     }
 
     /**
      * Gets file extension. Does "path.extname".
+     *
+     * @param pathStr
      */
     static pathExtname(pathStr: string): string {
         return path.extname(pathStr)
@@ -161,19 +127,23 @@ export class PlatformTools {
 
     /**
      * Resolved given path. Does "path.resolve".
+     *
+     * @param paths
      */
-    static pathResolve(pathStr: string): string {
-        return path.resolve(pathStr)
+    static pathResolve(...paths: string[]): string {
+        return path.resolve(...paths)
     }
 
     /**
      * Synchronously checks if file exist. Does "fs.existsSync".
+     *
+     * @param pathStr
      */
     static fileExist(pathStr: string): boolean {
         return fs.existsSync(pathStr)
     }
 
-    static readFileSync(filename: string): Buffer {
+    static readFileSync(filename: string): Uint8Array {
         return fs.readFileSync(filename)
     }
 
@@ -182,85 +152,90 @@ export class PlatformTools {
     }
 
     static async writeFile(path: string, data: any): Promise<void> {
-        return new Promise<void>((ok, fail) => {
-            fs.writeFile(path, data, (err) => {
-                if (err) fail(err)
-                ok()
-            })
+        return fs.promises.writeFile(path, data)
+    }
+
+    /**
+     * Highlights sql string to be printed in the console.
+     *
+     * @param sql
+     */
+    static highlightSql(sql: string) {
+        return highlight(sql, {
+            colors: {
+                keyword: ansi.blueBright.open,
+                function: ansi.magentaBright.open,
+                number: ansi.green.open,
+                string: ansi.white.open,
+                identifier: ansi.white.open,
+                special: ansi.white.open,
+                bracket: ansi.white.open,
+                comment: ansi.gray.open,
+                clear: ansi.reset.open,
+            },
         })
     }
 
     /**
-     * Loads a dotenv file into the environment variables.
+     * Pretty-print sql string to be print in the console.
      *
-     * @param path The file to load as a dotenv configuration
+     * @param sql
+     * @param dataSourceType
      */
-    static dotenv(pathStr: string): void {
-        dotenv.config({ path: pathStr })
-    }
-
-    /**
-     * Gets environment variable.
-     */
-    static getEnvVariable(name: string): any {
-        return process.env[name]
-    }
-
-    /**
-     * Highlights sql string to be print in the console.
-     */
-    static highlightSql(sql: string) {
-        const theme: Theme = {
-            keyword: chalk.blueBright,
-            literal: chalk.blueBright,
-            string: chalk.white,
-            type: chalk.magentaBright,
-            built_in: chalk.magentaBright,
-            comment: chalk.gray,
+    static formatSql(sql: string, dataSourceType?: DatabaseType): string {
+        const databaseLanguageMap: Record<
+            string,
+            SqlFormatterConfig["language"]
+        > = {
+            oracle: "pl/sql",
         }
-        return highlight(sql, { theme: theme, language: "sql" })
-    }
 
-    /**
-     * Highlights json string to be print in the console.
-     */
-    static highlightJson(json: string) {
-        return highlight(json, { language: "json" })
+        const databaseLanguage = dataSourceType
+            ? (databaseLanguageMap[dataSourceType] ?? "sql")
+            : "sql"
+
+        return sqlFormat(sql, {
+            language: databaseLanguage,
+            indent: "    ",
+        })
     }
 
     /**
      * Logging functions needed by AdvancedConsoleLogger
+     *
+     * @param prefix
+     * @param info
      */
     static logInfo(prefix: string, info: any) {
-        console.log(chalk.gray.underline(prefix), info)
+        console.log(ansi.gray.underline(prefix), info)
     }
 
     static logError(prefix: string, error: any) {
-        console.log(chalk.underline.red(prefix), error)
+        console.log(ansi.underline.red(prefix), error)
     }
 
     static logWarn(prefix: string, warning: any) {
-        console.log(chalk.underline.yellow(prefix), warning)
+        console.log(ansi.underline.yellow(prefix), warning)
     }
 
     static log(message: string) {
-        console.log(chalk.underline(message))
+        console.log(ansi.underline(message))
     }
 
     static info(info: any) {
-        return chalk.gray(info)
+        return ansi.gray(info)
     }
 
     static error(error: any) {
-        return chalk.red(error)
+        return ansi.red(error)
     }
 
     static warn(message: string) {
-        return chalk.yellow(message)
+        return ansi.yellow(message)
     }
 
     static logCmdErr(prefix: string, err?: any) {
-        console.log(chalk.black.bgRed(prefix))
+        console.log(ansi.black.bgRed(prefix))
         if (err) console.error(err)
     }
 }

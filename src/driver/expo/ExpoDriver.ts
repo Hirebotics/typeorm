@@ -1,92 +1,57 @@
+import type { DataSource } from "../../data-source/DataSource"
+import { DriverPackageNotInstalledError, TypeORMError } from "../../error"
+import { PlatformTools } from "../../platform/PlatformTools"
+import type { QueryRunner } from "../../query-runner/QueryRunner"
 import { AbstractSqliteDriver } from "../sqlite-abstract/AbstractSqliteDriver"
-import { ExpoConnectionOptions } from "./ExpoConnectionOptions"
+import type { ExpoDataSourceOptions } from "./ExpoDataSourceOptions"
 import { ExpoQueryRunner } from "./ExpoQueryRunner"
-import { QueryRunner } from "../../query-runner/QueryRunner"
-import { DataSource } from "../../data-source/DataSource"
-import { ReplicationMode } from "../types/ReplicationMode"
 
 export class ExpoDriver extends AbstractSqliteDriver {
-    options: ExpoConnectionOptions
+    declare options: ExpoDataSourceOptions
 
-    // -------------------------------------------------------------------------
-    // Constructor
-    // -------------------------------------------------------------------------
-
-    constructor(connection: DataSource) {
-        super(connection)
-
-        this.database = this.options.database
-
-        // load sqlite package
-        this.sqlite = this.options.driver
+    constructor(dataSource: DataSource) {
+        super(dataSource)
+        this.loadDependencies()
     }
 
-    // -------------------------------------------------------------------------
-    // Public Methods
-    // -------------------------------------------------------------------------
-
-    /**
-     * Closes connection with database.
-     */
     async disconnect(): Promise<void> {
-        return new Promise<void>((ok, fail) => {
-            try {
-                this.queryRunner = undefined
-                this.databaseConnection._db.close()
-                this.databaseConnection = undefined
-                ok()
-            } catch (error) {
-                fail(error)
-            }
-        })
+        this.queryRunner = undefined
+        await this.databaseConnection.closeAsync()
+        this.databaseConnection = undefined
     }
 
-    /**
-     * Creates a query runner used to execute database queries.
-     */
-    createQueryRunner(mode: ReplicationMode): QueryRunner {
-        if (!this.queryRunner) this.queryRunner = new ExpoQueryRunner(this)
-
+    createQueryRunner(): QueryRunner {
+        this.queryRunner ??= new ExpoQueryRunner(this)
         return this.queryRunner
     }
 
-    // -------------------------------------------------------------------------
-    // Protected Methods
-    // -------------------------------------------------------------------------
+    protected async createDatabaseConnection() {
+        this.databaseConnection = await this.sqlite.openDatabaseAsync(
+            this.options.database,
+        )
+        await this.databaseConnection.runAsync("PRAGMA foreign_keys = ON")
+        return this.databaseConnection
+    }
 
     /**
-     * Creates connection with the database.
+     * If driver dependency is not given explicitly, then try to load it via "require".
      */
-    protected createDatabaseConnection() {
-        return new Promise<void>((ok, fail) => {
-            try {
-                const databaseConnection = this.sqlite.openDatabase(
-                    this.options.database,
-                )
-                /*
-                // we need to enable foreign keys in sqlite to make sure all foreign key related features
-                // working properly. this also makes onDelete work with sqlite.
-                */
-                databaseConnection.transaction(
-                    (tsx: any) => {
-                        tsx.executeSql(
-                            `PRAGMA foreign_keys = ON`,
-                            [],
-                            (t: any, result: any) => {
-                                ok(databaseConnection)
-                            },
-                            (t: any, err: any) => {
-                                fail({ transaction: t, error: err })
-                            },
-                        )
-                    },
-                    (err: any) => {
-                        fail(err)
-                    },
-                )
-            } catch (error) {
-                fail(error)
-            }
-        })
+    protected loadDependencies(): void {
+        try {
+            this.sqlite =
+                this.options.driver ?? PlatformTools.load("expo-sqlite")
+        } catch {
+            throw new DriverPackageNotInstalledError(
+                "Expo SQLite",
+                "expo-sqlite",
+            )
+        }
+
+        // The modern Expo SQLite API that TypeORM supports exposes `openDatabaseAsync` as a function
+        if (typeof this.sqlite.openDatabaseAsync !== "function") {
+            throw new TypeORMError(
+                `The provided Expo SQLite client is not supported. Please upgrade your Expo SDK to v52 or higher!`,
+            )
+        }
     }
 }

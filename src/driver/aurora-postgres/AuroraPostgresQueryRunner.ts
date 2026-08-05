@@ -1,16 +1,19 @@
 import { QueryRunnerAlreadyReleasedError } from "../../error/QueryRunnerAlreadyReleasedError"
 import { TransactionNotStartedError } from "../../error/TransactionNotStartedError"
-import { QueryRunner } from "../../query-runner/QueryRunner"
-import { IsolationLevel } from "../types/IsolationLevel"
-import { AuroraPostgresDriver } from "./AuroraPostgresDriver"
+import type { QueryRunner } from "../../query-runner/QueryRunner"
+import type { IsolationLevel } from "../types/IsolationLevel"
+import { validateIsolationLevel } from "../validate-isolation-level"
+import type { AuroraPostgresDriver } from "./AuroraPostgresDriver"
 import { PostgresQueryRunner } from "../postgres/PostgresQueryRunner"
-import { ReplicationMode } from "../types/ReplicationMode"
+import type { ReplicationMode } from "../types/ReplicationMode"
 import { QueryResult } from "../../query-runner/QueryResult"
-import { Table } from "../../schema-builder/table/Table"
+import type { Table } from "../../schema-builder/table/Table"
 import { TypeORMError } from "../../error"
+import type { ObjectLiteral } from "../../common/ObjectLiteral"
+import { NamedPlaceholdersNotSupportedError } from "../../error/NamedPlaceholdersNotSupportedError"
 
 class PostgresQueryRunnerWrapper extends PostgresQueryRunner {
-    driver: any
+    declare driver: any
 
     constructor(driver: any, mode: ReplicationMode) {
         super(driver, mode)
@@ -31,18 +34,9 @@ export class AuroraPostgresQueryRunner
     /**
      * Database driver used by connection.
      */
-    driver: AuroraPostgresDriver
+    declare driver: AuroraPostgresDriver
 
     protected client: any
-
-    // -------------------------------------------------------------------------
-    // Protected Properties
-    // -------------------------------------------------------------------------
-
-    /**
-     * Promise used to obtain a database connection for a first time.
-     */
-    protected databaseConnectionPromise: Promise<any>
 
     // -------------------------------------------------------------------------
     // Constructor
@@ -99,8 +93,17 @@ export class AuroraPostgresQueryRunner
 
     /**
      * Starts transaction on the current connection.
+     *
+     * @param isolationLevel
      */
     async startTransaction(isolationLevel?: IsolationLevel): Promise<void> {
+        isolationLevel ??= this.dataSource.options.isolationLevel
+
+        validateIsolationLevel(
+            this.driver.supportedIsolationLevels,
+            isolationLevel,
+        )
+
         this.isTransactionActive = true
         try {
             await this.broadcaster.broadcast("BeforeTransactionStart")
@@ -110,12 +113,30 @@ export class AuroraPostgresQueryRunner
         }
 
         if (this.transactionDepth === 0) {
-            this.transactionDepth += 1
-            await this.client.startTransaction()
+            try {
+                await this.client.startTransaction()
+            } catch (err) {
+                this.isTransactionActive = false
+                throw err
+            }
+            if (isolationLevel) {
+                try {
+                    await this.query(
+                        `SET TRANSACTION ISOLATION LEVEL ${isolationLevel}`,
+                    )
+                } catch (err) {
+                    try {
+                        await this.client.rollbackTransaction()
+                    } finally {
+                        this.isTransactionActive = false
+                    }
+                    throw err
+                }
+            }
         } else {
-            this.transactionDepth += 1
-            await this.query(`SAVEPOINT typeorm_${this.transactionDepth} - 1`)
+            await this.query(`SAVEPOINT typeorm_${this.transactionDepth}`)
         }
+        this.transactionDepth += 1
 
         await this.broadcaster.broadcast("AfterTransactionStart")
     }
@@ -130,15 +151,14 @@ export class AuroraPostgresQueryRunner
         await this.broadcaster.broadcast("BeforeTransactionCommit")
 
         if (this.transactionDepth > 1) {
-            this.transactionDepth -= 1
             await this.query(
-                `RELEASE SAVEPOINT typeorm_${this.transactionDepth}`,
+                `RELEASE SAVEPOINT typeorm_${this.transactionDepth - 1}`,
             )
         } else {
-            this.transactionDepth -= 1
             await this.client.commitTransaction()
             this.isTransactionActive = false
         }
+        this.transactionDepth -= 1
 
         await this.broadcaster.broadcast("AfterTransactionCommit")
     }
@@ -153,28 +173,33 @@ export class AuroraPostgresQueryRunner
         await this.broadcaster.broadcast("BeforeTransactionRollback")
 
         if (this.transactionDepth > 1) {
-            this.transactionDepth -= 1
             await this.query(
-                `ROLLBACK TO SAVEPOINT typeorm_${this.transactionDepth}`,
+                `ROLLBACK TO SAVEPOINT typeorm_${this.transactionDepth - 1}`,
             )
         } else {
-            this.transactionDepth -= 1
             await this.client.rollbackTransaction()
             this.isTransactionActive = false
         }
+        this.transactionDepth -= 1
 
         await this.broadcaster.broadcast("AfterTransactionRollback")
     }
 
     /**
      * Executes a given SQL query.
+     *
+     * @param query
+     * @param parameters
+     * @param useStructuredResult
      */
     async query(
         query: string,
-        parameters?: any[],
+        parameters?: any[] | ObjectLiteral,
         useStructuredResult = false,
     ): Promise<any> {
         if (this.isReleased) throw new QueryRunnerAlreadyReleasedError()
+        if (parameters && !Array.isArray(parameters))
+            throw new NamedPlaceholdersNotSupportedError()
 
         const raw = await this.client.query(query, parameters)
 
@@ -199,6 +224,9 @@ export class AuroraPostgresQueryRunner
 
     /**
      * Change table comment.
+     *
+     * @param tableOrName
+     * @param comment
      */
     changeTableComment(
         tableOrName: Table | string,

@@ -1,11 +1,13 @@
-import { EntitySchema } from "../entity-schema/EntitySchema"
-import { LoggerOptions } from "../logger/LoggerOptions"
-import { NamingStrategyInterface } from "../naming-strategy/NamingStrategyInterface"
-import { DatabaseType } from "../driver/types/DatabaseType"
-import { Logger } from "../logger/Logger"
-import { DataSource } from "../data-source/DataSource"
-import { QueryResultCache } from "../cache/QueryResultCache"
-import { MixedList } from "../common/MixedList"
+import type { QueryResultCache } from "../cache/QueryResultCache"
+import type { MixedList } from "../common/MixedList"
+import type { DataSource } from "../data-source/DataSource"
+import type { DatabaseType } from "../driver/types/DatabaseType"
+import type { InvalidFindOptionsWhereBehavior } from "../driver/types/InvalidFindOptionsWhereBehavior"
+import type { IsolationLevel } from "../driver/types/IsolationLevel"
+import type { EntitySchema } from "../entity-schema/EntitySchema"
+import type { Logger } from "../logger/Logger"
+import type { LoggerOptions } from "../logger/LoggerOptions"
+import type { NamingStrategyInterface } from "../naming-strategy/NamingStrategyInterface"
 
 /**
  * BaseDataSourceOptions is set of DataSourceOptions shared by all database types.
@@ -15,14 +17,6 @@ export interface BaseDataSourceOptions {
      * Database type. This value is required.
      */
     readonly type: DatabaseType
-
-    /**
-     * Connection name. If connection name is not given then it will be called "default".
-     * Different connections must have different names.
-     *
-     * @deprecated
-     */
-    readonly name?: string
 
     /**
      * Entities to be loaded for this connection.
@@ -37,6 +31,14 @@ export interface BaseDataSourceOptions {
      * Directories support glob patterns.
      */
     readonly subscribers?: MixedList<Function | string>
+
+    /**
+     * Default isolation level for transactions. When set, all transactions started
+     * without an explicit level will use this value. An explicit isolation level
+     * passed to `transaction()` or `startTransaction()` overrides this default.
+     * Must be a level supported by the driver.
+     */
+    readonly isolationLevel?: IsolationLevel
 
     /**
      * Migrations to be loaded for this connection.
@@ -77,6 +79,7 @@ export interface BaseDataSourceOptions {
     readonly logger?:
         | "advanced-console"
         | "simple-console"
+        | "formatted-console"
         | "file"
         | "debug"
         | Logger
@@ -126,9 +129,13 @@ export interface BaseDataSourceOptions {
     readonly entitySkipConstructor?: boolean
 
     /**
-     * Extra connection options to be passed to the underlying driver.
+     * Extra connection options passed through to the underlying driver client
+     * (e.g. `pg`, `mysql2`, `tedious`, `mongodb`).
      *
-     * todo: deprecate this and move all database-specific types into hts own connection options object.
+     * Use this for driver-native settings that are not modeled as typed
+     * options on the per-driver `DataSourceOptions`. Prefer the typed
+     * per-driver options when they exist; `extra` is the escape hatch for
+     * anything the driver supports but TypeORM does not expose directly.
      */
     readonly extra?: any
 
@@ -170,15 +177,12 @@ export interface BaseDataSourceOptions {
                * - "redis" means cached values will be stored inside redis. You must provide redis connection options.
                */
               readonly type?:
-                  | "database"
-                  | "redis"
-                  | "ioredis"
-                  | "ioredis/cluster" // todo: add mongodb and other cache providers as well in the future
+                  "database" | "redis" | "ioredis" | "ioredis/cluster" // todo: add mongodb and other cache providers as well in the future
 
               /**
                * Factory function for custom cache providers that implement QueryResultCache.
                */
-              readonly provider?: (connection: DataSource) => QueryResultCache
+              readonly provider?: (dataSource: DataSource) => QueryResultCache
 
               /**
                * Configurable table name for "database" type cache.
@@ -213,4 +217,10 @@ export interface BaseDataSourceOptions {
      * Allows automatic isolation of where clauses
      */
     readonly isolateWhereStatements?: boolean
+
+    /**
+     * Controls how null/undefined values in where criteria are handled by find
+     * and write methods (update/delete/softDelete/restore). Defaults to "throw".
+     */
+    readonly invalidWhereValuesBehavior?: InvalidFindOptionsWhereBehavior
 }
