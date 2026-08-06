@@ -184,6 +184,25 @@ export class BetterSqlite3QueryRunner extends AbstractSqliteQueryRunner {
                 )
                     throw err
 
+                // SQLITE_BUSY_SNAPSHOT means the transaction's WAL snapshot went stale,
+                // and sqlite keeps that snapshot for the life of the transaction.
+                // Every retry then fails identically, so spend none of the budget on them.
+                // SQLITE_BUSY_RECOVERY is not treated this way: another process is rebuilding
+                // the WAL, which ends on its own, so retrying does clear it.
+                if (
+                    this.isSqliteError(err, "SQLITE_BUSY_SNAPSHOT") &&
+                    this.isTransactionOpen()
+                ) {
+                    this.driver.connection.logger.log(
+                        "warn",
+                        "SQLITE_BUSY_SNAPSHOT inside an open transaction cannot be resolved by retrying, " +
+                            "the transaction must be rolled back and replayed. Failing query immediately",
+                        this,
+                    )
+
+                    throw err
+                }
+
                 // A falsy limit means retry forever, matching the sqlite driver's busyErrorRetry.
                 if (busyErrorRetryLimit > 0 && attempt >= busyErrorRetryLimit) {
                     this.driver.connection.logger.log(
@@ -211,10 +230,24 @@ export class BetterSqlite3QueryRunner extends AbstractSqliteQueryRunner {
     }
 
     /**
+     * True when the sqlite connection sits inside an open transaction.
+     *
+     * Asks better-sqlite3 as well as this runner: every sqlite query runner shares the one
+     * driver connection, so a transaction another runner opened -- or a raw `BEGIN`, which
+     * never sets isTransactionActive -- pins a snapshot for this runner's queries too.
+     */
+    protected isTransactionOpen(): boolean {
+        return (
+            this.isTransactionActive ||
+            this.driver.databaseConnection?.inTransaction === true
+        )
+    }
+
+    /**
      * True when `err` is a better-sqlite3 SqliteError whose code starts with `codePrefix`.
      *
      * Prefix and not equality, because SQLITE_BUSY_SNAPSHOT and SQLITE_BUSY_RECOVERY are
-     * separate codes that need the same handling as plain SQLITE_BUSY.
+     * separate codes that still mean "database is busy".
      *
      * @see https://github.com/WiseLibs/better-sqlite3/blob/master/lib/sqlite-error.js
      */
