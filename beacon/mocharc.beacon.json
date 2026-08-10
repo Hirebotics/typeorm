@@ -1,0 +1,8 @@
+{
+  "$schema": "https://json.schemastore.org/mocharc",
+  "//": "Hirebotics / Beacon — NOT upstream. Used by beacon/test.sh. Intentionally has NO 'spec' glob: test.sh passes the exact compiled test files to run, so we never pick up the whole upstream suite (which would surface unrelated failures).",
+  "require": ["./build/compiled/test/utils/test-setup.js"],
+  "timeout": 90000,
+  "exit": true,
+  "color": true
+}
