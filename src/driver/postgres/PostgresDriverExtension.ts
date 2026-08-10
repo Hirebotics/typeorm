@@ -27,9 +27,21 @@ export class PostgresQueryRunnerExtension extends PostgresQueryRunner {
     private rawConnection: any
 
     async connect(): Promise<any> {
+        // super.connect() checks a client out of the pool only on the first call,
+        // afterwards it returns the memoized connection.
+        // query() calls connect() for every query, so guard the hook to fire
+        // once per real checkout rather than once per query.
+        const alreadyConnected = !!(
+            this.databaseConnection || this.databaseConnectionPromise
+        )
+
         this.rawConnection = await super.connect()
 
-        if (this.rawConnection && registeredOptions?.onConnect) {
+        if (
+            !alreadyConnected &&
+            this.rawConnection &&
+            registeredOptions?.onConnect
+        ) {
             try {
                 await registeredOptions.onConnect(this.rawConnection)
             } catch (err) {
