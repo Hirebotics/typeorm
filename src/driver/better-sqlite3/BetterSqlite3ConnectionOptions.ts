@@ -76,4 +76,24 @@ export interface BetterSqlite3ConnectionOptions extends BaseDataSourceOptions {
      * @see https://www.sqlite.org/wal.html
      */
     readonly enableWAL?: boolean
+
+    /**
+     * Retry interval in milliseconds when a query fails with a SQLITE_BUSY* error.
+     * Sqlite allows only one writer at a time, so concurrent writes surface as SQLITE_BUSY.
+     *
+     * Unlike `timeout` this waits asynchronously, so it does not block the event loop,
+     * and it also covers SQLITE_BUSY_SNAPSHOT, which sqlite's own busy handler never sees.
+     *
+     * Default: 0 (no retries)
+     */
+    readonly busyErrorRetryInterval?: number
+
+    /**
+     * The maximum number of times to retry a query when a SQLITE_BUSY* error occurs.
+     * When falsy (undefined or 0) the query is retried indefinitely.
+     * Only has an effect when `busyErrorRetryInterval` is set.
+     *
+     * Default: 0 (infinite retries)
+     */
+    readonly busyErrorRetryLimit?: number
 }

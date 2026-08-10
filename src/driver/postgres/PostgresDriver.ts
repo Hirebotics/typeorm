@@ -21,6 +21,7 @@ import { VersionUtils } from "../../util/VersionUtils"
 import { PostgresConnectionCredentialsOptions } from "./PostgresConnectionCredentialsOptions"
 import { PostgresConnectionOptions } from "./PostgresConnectionOptions"
 import { PostgresQueryRunner } from "./PostgresQueryRunner"
+import { PostgresQueryRunnerExtension } from "./PostgresDriverExtension"
 import { DriverUtils } from "../DriverUtils"
 import { TypeORMError } from "../../error"
 import { Table } from "../../schema-builder/table/Table"
@@ -638,7 +639,8 @@ export class PostgresDriver implements Driver {
      * Creates a query runner used to execute database queries.
      */
     createQueryRunner(mode: ReplicationMode): PostgresQueryRunner {
-        return new PostgresQueryRunner(this, mode)
+        // Always the extension subclass: it is a no-op until extendPostgresDriver() registers hooks.
+        return new PostgresQueryRunnerExtension(this, mode)
     }
 
     /**
