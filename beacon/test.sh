@@ -72,7 +72,9 @@ pnpm run compile
 
 echo "[beacon] running Beacon tests ..."
 node_modules/.bin/mocha --config "$BEACON_DIR/mocharc.beacon.json" \
-    build/compiled/test/functional/driver/better-sqlite3/better-sqlite3-busy-error-retry.test.js \
+    build/compiled/test/functional/driver/abstract-sqlite/abstract-sqlite-query-runner-ownership.test.js \
+    build/compiled/test/functional/driver/abstract-sqlite/abstract-sqlite-begin-immediate.test.js \
+    build/compiled/test/functional/driver/abstract-sqlite/abstract-sqlite-busy-error-retry.test.js \
     build/compiled/test/functional/driver/postgres/postgres-driver-extension.test.js \
     build/compiled/test/functional/driver/postgres/connection-options.test.js \
     build/compiled/test/functional/query-builder/insert/query-builder-insert.test.js \
@@ -81,4 +83,5 @@ node_modules/.bin/mocha --config "$BEACON_DIR/mocharc.beacon.json" \
     build/compiled/test/functional/persistence/basic-functionality/persistence-basic-functionality.test.js \
     build/compiled/test/functional/transaction/return-data-from-transaction/return-data-from-transaction.test.js \
     build/compiled/test/functional/transaction/transaction-in-entity-manager/transaction-in-entity-manager.test.js \
-    build/compiled/test/functional/transaction/single-query-runner/single-query-runner.test.js
+    build/compiled/test/functional/transaction/single-query-runner/single-query-runner.test.js \
+    build/compiled/test/functional/transaction/nested-transaction/transaction-in-entity-manager.test.js
