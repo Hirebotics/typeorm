@@ -1,7 +1,7 @@
 import fs from "fs/promises"
 import path from "path"
 import { DriverPackageNotInstalledError } from "../../error/DriverPackageNotInstalledError"
-import { SqliteQueryRunner } from "./SqliteQueryRunner"
+import { SerializedSqliteQueryRunner } from "../sqlite-abstract/SqliteConnectionLease"
 import { PlatformTools } from "../../platform/PlatformTools"
 import { DataSource } from "../../data-source/DataSource"
 import { SqliteConnectionOptions } from "./SqliteConnectionOptions"
@@ -63,9 +63,10 @@ export class SqliteDriver extends AbstractSqliteDriver {
      * Creates a query runner used to execute database queries.
      */
     createQueryRunner(mode: ReplicationMode): QueryRunner {
-        if (!this.queryRunner) this.queryRunner = new SqliteQueryRunner(this)
-
-        return this.queryRunner
+        // One runner per caller, not one per driver.
+        // A query runner owns a transaction, so sharing one lets two units of work collide in
+        // a single transaction and lose writes. The serialized runner leases the connection.
+        return new SerializedSqliteQueryRunner(this)
     }
 
     normalizeType(column: {

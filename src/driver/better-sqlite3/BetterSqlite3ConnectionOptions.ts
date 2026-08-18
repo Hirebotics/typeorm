@@ -78,22 +78,37 @@ export interface BetterSqlite3ConnectionOptions extends BaseDataSourceOptions {
     readonly enableWAL?: boolean
 
     /**
-     * Retry interval in milliseconds when a query fails with a SQLITE_BUSY* error.
-     * Sqlite allows only one writer at a time, so concurrent writes surface as SQLITE_BUSY.
+     * Milliseconds to wait before retrying a statement that failed with SQLITE_BUSY.
+     * Sqlite allows one writer at a time, so concurrent writes surface as SQLITE_BUSY.
      *
-     * Unlike `timeout` this waits asynchronously, so it does not block the event loop,
-     * and it also covers SQLITE_BUSY_SNAPSHOT, which sqlite's own busy handler never sees.
+     * Waits asynchronously, unlike the driver's own busy timeout, so it does not block the
+     * event loop while waiting.
      *
-     * Default: 0 (no retries)
+     * Statements inside a transaction are not retried: sqlite has already rolled the failed
+     * statement back, so retrying just that one would commit a partial unit of work.
+     * COMMIT and ROLLBACK are retried, since both can legitimately return SQLITE_BUSY.
+     *
+     * Default: 0, meaning no retries.
      */
     readonly busyErrorRetryInterval?: number
 
     /**
-     * The maximum number of times to retry a query when a SQLITE_BUSY* error occurs.
-     * When falsy (undefined or 0) the query is retried indefinitely.
-     * Only has an effect when `busyErrorRetryInterval` is set.
+     * How many times one statement may be retried after SQLITE_BUSY. Must be above 0.
+     * Only has an effect when busyErrorRetryInterval is set.
      *
-     * Default: 0 (infinite retries)
+     * Default: 10.
      */
     readonly busyErrorRetryLimit?: number
+
+    /**
+     * Milliseconds a query runner waits for exclusive use of the connection before failing.
+     *
+     * Sqlite has one connection, so query runners take turns holding it for the length of
+     * their transaction. This wait has to outlast the holder's whole retry budget, or a
+     * waiter gives up on a holder that is still making progress.
+     *
+     * Defaults to the worst-case retry budget scaled for a few contending runners,
+     * and never less than 30000.
+     */
+    readonly connectionLeaseTimeout?: number
 }

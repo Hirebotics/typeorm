@@ -7,7 +7,7 @@ import { ColumnType } from "../types/ColumnTypes"
 import { QueryRunner } from "../../query-runner/QueryRunner"
 import { AbstractSqliteDriver } from "../sqlite-abstract/AbstractSqliteDriver"
 import { BetterSqlite3ConnectionOptions } from "./BetterSqlite3ConnectionOptions"
-import { BetterSqlite3QueryRunner } from "./BetterSqlite3QueryRunner"
+import { SerializedBetterSqlite3QueryRunner } from "../sqlite-abstract/SqliteConnectionLease"
 import { ReplicationMode } from "../types/ReplicationMode"
 import { filepathToName, isAbsolute } from "../../util/PathUtils"
 
@@ -60,10 +60,10 @@ export class BetterSqlite3Driver extends AbstractSqliteDriver {
      * Creates a query runner used to execute database queries.
      */
     createQueryRunner(mode: ReplicationMode): QueryRunner {
-        if (!this.queryRunner)
-            this.queryRunner = new BetterSqlite3QueryRunner(this)
-
-        return this.queryRunner
+        // One runner per caller, not one per driver.
+        // A query runner owns a transaction, so sharing one lets two units of work collide in
+        // a single transaction and lose writes. The serialized runner leases the connection.
+        return new SerializedBetterSqlite3QueryRunner(this)
     }
 
     normalizeType(column: {
