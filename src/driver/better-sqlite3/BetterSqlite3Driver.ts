@@ -61,8 +61,9 @@ export class BetterSqlite3Driver extends AbstractSqliteDriver {
      */
     createQueryRunner(mode: ReplicationMode): QueryRunner {
         // One runner per caller, not one per driver.
-        // A query runner owns a transaction, so sharing one lets two units of work collide in
-        // a single transaction and lose writes. The serialized runner leases the connection.
+        // A query runner owns a transaction,
+        // so sharing one lets two units of work collide in one transaction and lose writes.
+        // The serialized runner leases the connection.
         return new SerializedBetterSqlite3QueryRunner(this)
     }
 

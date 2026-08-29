@@ -10,19 +10,24 @@ import { AbstractSqliteQueryRunner } from "./AbstractSqliteQueryRunner"
  *
  * Upstream's sqlite drivers cache one query runner and hand the same object to every caller,
  * on the reasoning that sqlite has one connection so it can only have one query runner.
- * A query runner owns a *transaction*, though, not a connection. Sharing one lets two units of
- * work land in a single transaction: the second one's writes become a savepoint inside the
- * first one's transaction and vanish with its ROLLBACK, while its caller is told it succeeded.
+ * A query runner owns a *transaction*, though, not a connection.
+ * Sharing one lets two units of work land in a single transaction:
+ * the second one's writes become a savepoint inside the first one's transaction
+ * and vanish with its ROLLBACK, while its caller is told it succeeded.
  *
  * The fix is two halves, and neither works alone:
  *   1. the drivers return a fresh runner per call, so each unit of work owns its transaction
  *   2. these subclasses lease the one connection, so those transactions cannot interleave
  *
- * Shipping half 1 without half 2 is worse than the bug: a second concurrent BEGIN throws
- * SQLITE_ERROR, and the failing runner's ROLLBACK then kills the *other* runner's transaction.
+ * Shipping half 1 without half 2 is worse than the bug:
+ * a second concurrent BEGIN throws SQLITE_ERROR,
+ * and the failing runner's ROLLBACK then kills the *other* runner's transaction.
  */
 
-/** Options read off the driver. Declared in the two *ConnectionOptions.ts interfaces. */
+/**
+ * Options read off the driver.
+ * Each driver's connection options interface declares its own.
+ */
 interface SqliteLeaseOptions {
     busyErrorRetryInterval?: number
     busyErrorRetryLimit?: number
@@ -40,15 +45,18 @@ const DEFAULT_RETRY_LIMIT = 10
  * Both drivers apply a busy timeout we never see in `options`.
  * BetterSqlite3Driver destructures `timeout = 5000` inside createDatabaseConnection(),
  * and node-sqlite3 calls sqlite3_busy_timeout(handle, 1000) in C at open, before any option.
- * Reading the configured value alone would report 0 on an unconfigured install, which is
- * production today and the reason a "200ms" retry budget really costs 16 seconds.
+ * Reading the configured value alone would report 0 on an unconfigured install.
+ * Production today is unconfigured,
+ * which is the reason a nominal 200ms retry budget really costs 16 seconds.
  */
 const IMPLICIT_BUSY_TIMEOUT = {
     betterSqlite3: 5000,
     sqlite: 1000,
 }
 
-/** Lease acquire never waits less than this, however small the retry budget works out to be. */
+/**
+ * Lease acquire never waits less than this, however small the retry budget works out to be.
+ */
 const MIN_LEASE_TIMEOUT = 30000
 
 /**
@@ -57,14 +65,17 @@ const MIN_LEASE_TIMEOUT = 30000
  */
 const EXPECTED_CONTENDING_RUNNERS = 3
 
-/** Wait longer than this for the connection and we log, so field stalls are visible. */
+/**
+ * Any wait on the connection longer than this is logged, so field stalls are visible.
+ */
 const SLOW_ACQUIRE_WARN_MS = 1000
 
 const delay = (ms: number) => new Promise<void>((ok) => setTimeout(ok, ms))
 
 /**
  * Retry only covers SQLITE_BUSY, so match on the code rather than the message where we can.
- * QueryFailedError copies the driver error's own enumerable props, so `code` survives the wrap.
+ * QueryFailedError copies the driver error's own enumerable properties,
+ * so `code` survives the wrap.
  */
 function isBusyError(err: any): boolean {
     const code = err?.code ?? err?.driverError?.code
@@ -159,8 +170,8 @@ class ConnectionLease {
 }
 
 /**
- * Keyed on the driver rather than the connection handle: the driver exists before the handle
- * does, and both live exactly as long as the DataSource.
+ * Keyed on the driver rather than the connection handle.
+ * The driver exists before the handle does, and both live exactly as long as the DataSource.
  */
 const leases = new WeakMap<AbstractSqliteDriver, ConnectionLease>()
 
@@ -180,8 +191,8 @@ function leaseFor(driver: AbstractSqliteDriver): ConnectionLease {
 /**
  * What the slot needs from the runner holding it.
  *
- * Extends the runner class so that `depth` can widen the protected transactionDepth;
- * only subclasses of AbstractSqliteQueryRunner can satisfy an interface shaped like this,
+ * Extends the runner class so that `depth` can widen the protected transactionDepth.
+ * Only subclasses of AbstractSqliteQueryRunner can satisfy an interface shaped like this,
  * which is exactly the constraint we want.
  */
 export interface SlotHost extends AbstractSqliteQueryRunner {
@@ -192,8 +203,9 @@ export interface SlotHost extends AbstractSqliteQueryRunner {
 /**
  * BEGIN IMMEDIATE takes the write lock up front.
  *
- * PowerSync writes over its own connection, so we cannot serialize it. A deferred BEGIN pins a
- * read snapshot that then fails SQLITE_BUSY_SNAPSHOT on upgrade, which retry can never clear.
+ * PowerSync writes over its own connection, so we cannot serialize it.
+ * A deferred BEGIN pins a read snapshot that later fails SQLITE_BUSY_SNAPSHOT on upgrade,
+ * and no retry can clear that state.
  * Failing at BEGIN instead turns "unit of work half done" into "unit of work not started".
  */
 export function toImmediateBegin(query: string): string {
@@ -203,9 +215,9 @@ export function toImmediateBegin(query: string): string {
 /**
  * One runner's claim on the single connection, plus the SQLITE_BUSY retry it runs under.
  *
- * Composed rather than mixed in: a mixin cannot be used here because typeorm emits
- * declarations, and TypeScript will not emit a .d.ts for an anonymous class that has
- * protected members (TS4094).
+ * Composed rather than mixed in.
+ * A mixin cannot work here: typeorm emits declaration files,
+ * and TypeScript will not emit a .d.ts for an anonymous class with protected members (TS4094).
  */
 export class ConnectionSlot {
     /** Statements running right now on this runner. TypeORM issues them concurrently. */
@@ -217,9 +229,8 @@ export class ConnectionSlot {
     /**
      * In-flight acquire, shared by every statement on this runner.
      *
-     * Without it, two statements issued together (SubjectDatabaseEntityLoader does a
-     * Promise.all before the transaction opens) would each queue for the same slot, and the
-     * second would wait out the timeout for a slot its own runner already holds.
+     * Without it, two statements issued together would each queue for the same slot,
+     * and the second would wait out the timeout for a slot its own runner already holds.
      */
     private acquisition: Promise<void> | undefined
 
@@ -251,9 +262,10 @@ export class ConnectionSlot {
     }
 
     /**
-     * The slot is held across a whole transaction, retries included, so this wait has to
-     * dominate the retry budget. Otherwise a waiter gives up on a holder that is still making
-     * progress. Sized for EXPECTED_CONTENDING_RUNNERS, not for a single holder.
+     * The slot is held across a whole transaction, retries included,
+     * so this wait has to dominate the retry budget.
+     * Otherwise a waiter gives up on a holder that is still making progress.
+     * Sized for EXPECTED_CONTENDING_RUNNERS, not for a single holder.
      */
     leaseTimeout(): number {
         const configured = this.options.connectionLeaseTimeout
@@ -297,9 +309,10 @@ export class ConnectionSlot {
     /**
      * Frees the slot once nothing on this runner still needs it.
      *
-     * Do not simplify this to `depth === 0`. startTransaction() sets isTransactionActive
-     * *before* issuing BEGIN and increments transactionDepth *after*, so a depth-only test
-     * frees the slot in the middle of opening a transaction.
+     * Do not simplify the checks below to `depth === 0`.
+     * startTransaction() sets isTransactionActive *before* issuing BEGIN
+     * and increments transactionDepth *after*,
+     * so a depth-only test frees the slot in the middle of opening a transaction.
      */
     releaseIfIdle(): void {
         if (!this.holds) return
@@ -322,15 +335,18 @@ export class ConnectionSlot {
     /**
      * Retry is safe only where a failed statement leaves nothing behind.
      *
-     * Inside a transaction it is not: sqlite has already rolled the statement back and the unit
-     * of work is incomplete, so retrying the one statement would commit a partial result.
-     * COMMIT and ROLLBACK are the exceptions. Both legitimately return SQLITE_BUSY with a reader
-     * present, and both must land, or the connection stays inside a transaction and the next
-     * runner's BEGIN fails with SQLITE_ERROR, which no retry covers.
+     * Inside a transaction it is not:
+     * sqlite has already rolled the failed statement back and the unit of work is incomplete,
+     * so retrying the one statement would commit a partial result.
+     * COMMIT and ROLLBACK are the exceptions.
+     * Both legitimately return SQLITE_BUSY when a reader is present, and both must land.
+     * A transaction left open makes the next runner's BEGIN fail with SQLITE_ERROR,
+     * which no retry covers.
      *
-     * Gated on transaction state rather than on the error code, because node-sqlite3 never calls
-     * sqlite3_extended_result_codes(): SQLITE_BUSY_SNAPSHOT is invisible on that driver, so a
-     * code-prefix rule could not be shared by both.
+     * The gate is transaction state rather than the error code,
+     * because node-sqlite3 never calls sqlite3_extended_result_codes():
+     * SQLITE_BUSY_SNAPSHOT is invisible on that driver,
+     * so a code-prefix rule could not be shared by both drivers.
      */
     private isRetryable(sql: string): boolean {
         return this.host.depth === 0 || /^\s*(COMMIT|END|ROLLBACK)\b/i.test(sql)
@@ -377,12 +393,14 @@ export class ConnectionSlot {
     /**
      * Frees the slot unconditionally, rolling back an abandoned transaction first.
      *
-     * A divergence from every other driver, which only flips isReleased. Needed because sqlite
-     * has one connection: a transaction left open here would make the next runner's BEGIN fail
-     * with SQLITE_ERROR rather than SQLITE_BUSY, so retry could not recover.
+     * A divergence from every other driver, which only flips isReleased here.
+     * Sqlite has one connection:
+     * a transaction left open would fail the next runner's BEGIN with SQLITE_ERROR
+     * rather than SQLITE_BUSY, so retry could not recover.
      *
-     * Never throws. TypeORM calls release() from finally blocks throughout, so throwing would
-     * both leak the slot and mask the error that got us here.
+     * Never throws.
+     * TypeORM calls release() from finally blocks throughout,
+     * so throwing would both leak the slot and mask the error that got us here.
      */
     async releaseRunner(
         rollback: () => Promise<any>,
@@ -390,8 +408,9 @@ export class ConnectionSlot {
     ): Promise<void> {
         try {
             if (this.host.isTransactionActive) {
-                // Only worth attempting if we hold the slot. If we do not, the BEGIN never
-                // took, so there is no transaction on the connection to roll back.
+                // Only worth attempting if we hold the slot.
+                // Without the slot the BEGIN never took,
+                // so there is no transaction on the connection to roll back.
                 if (this.holds) {
                     try {
                         await rollback()
@@ -447,9 +466,10 @@ export class SerializedSqliteQueryRunner
         try {
             await super.startTransaction(isolationLevel)
         } catch (err) {
-            // A BeforeTransactionStart subscriber that queries and then throws leaves the slot
-            // held with no commit or rollback coming. Its catch clears isTransactionActive
-            // first, so by here the idle test is accurate.
+            // A BeforeTransactionStart subscriber that queries and then throws
+            // leaves the slot held with no commit or rollback coming.
+            // super's catch clears isTransactionActive before rethrowing,
+            // so by here the idle test is accurate.
             this.slot.releaseIfIdle()
             throw err
         }
@@ -459,9 +479,9 @@ export class SerializedSqliteQueryRunner
         try {
             await super.commitTransaction()
         } finally {
-            // Has to be here, not in query(). COMMIT is issued while isTransactionActive is
-            // still true and transactionDepth is still 1, so the check inside run() correctly
-            // declines to free the slot, and nothing else calls back.
+            // Has to be here, not in query().
+            // COMMIT runs while isTransactionActive is still true and depth is still 1,
+            // so run() correctly declines to free the slot, and nothing else calls back.
             this.slot.releaseIfIdle()
         }
     }
@@ -485,13 +505,15 @@ export class SerializedSqliteQueryRunner
 /**
  * Cache of prepared statements, shared by every runner on one connection handle.
  *
- * Upstream caches statements per runner. That was free while the driver reused a single runner
- * forever; with a runner per unit of work the cache is born empty every time and identical SQL
- * re-prepares on every query, which reads the schema each time.
+ * Upstream caches statements per runner.
+ * That was free while the driver reused a single runner forever.
+ * With a runner per unit of work the cache is born empty every time,
+ * so identical SQL re-prepares on every query, and every prepare reads the schema.
  *
- * Hung off the connection handle, so a destroy()/initialize() cycle cannot hand out statements
- * compiled against a closed handle. Safe to share: .all() and .run() are synchronous, the driver
- * never opens an iterator, and the lease means only one runner is ever mid-statement.
+ * Hung off the connection handle,
+ * so a destroy()/initialize() cycle cannot hand out statements compiled against a closed handle.
+ * Safe to share: .all() and .run() are synchronous, the driver never opens an iterator,
+ * and the lease means only one runner is ever mid-statement.
  */
 const memoizedConnections = new WeakSet<object>()
 
@@ -500,8 +522,8 @@ function memoizePrepare(databaseConnection: any, cacheSize: number): void {
         return
     memoizedConnections.add(databaseConnection)
 
-    // Upstream documents statementCacheSize 0 as "do not cache". Honour it here too, otherwise
-    // this memo would quietly reinstate caching that the config asked to turn off.
+    // Upstream documents statementCacheSize 0 as "do not cache".
+    // Honour that here too, or this memo would quietly reinstate caching the config turned off.
     if (cacheSize <= 0) return
 
     const prepare = databaseConnection.prepare.bind(databaseConnection)
@@ -512,7 +534,7 @@ function memoizePrepare(databaseConnection: any, cacheSize: number): void {
         if (!stmt) {
             stmt = prepare(sql)
             cache.set(sql, stmt)
-            // Map keeps insertion order, so deleting the first key evicts FIFO.
+            // Map keeps insertion order, so deleting the first key evicts the oldest statement.
             while (cache.size > cacheSize) {
                 cache.delete(cache.keys().next().value!)
             }
@@ -596,12 +618,14 @@ export class SerializedBetterSqlite3QueryRunner
     }
 
     /**
-     * Same reason, and the worst offender: loadTables() fires three of these per table at once,
-     * and better-sqlite3's pragma() is synchronous, so unleased they each block the event loop
-     * for the busy timeout.
+     * Same reason, and the worst offender:
+     * loadTables() fires three of these per table at once.
+     * better-sqlite3's pragma() is synchronous,
+     * so each unleased call blocks the event loop for the busy timeout.
      *
-     * Reimplemented rather than delegated to super: the abstract version drops the attached
-     * database prefix, so delegating would silently lose attached-database support.
+     * Reimplemented rather than delegated to super:
+     * the abstract version drops the attached database prefix,
+     * so delegating would silently lose attached-database support.
      */
     protected async loadPragmaRecords(
         tablePath: string,

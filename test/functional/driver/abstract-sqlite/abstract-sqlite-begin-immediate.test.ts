@@ -12,13 +12,17 @@ import { captureSql, openSecondHandle } from "./sqlite-lease-test-utils"
 /**
  * Why the driver rewrites BEGIN to BEGIN IMMEDIATE.
  *
- * PowerSync writes over its own connection from a worker thread, so it is a writer the lease
- * cannot serialize. Under WAL a deferred BEGIN pins a read snapshot on the first read, and if
- * another connection commits before we upgrade to a writer, the upgrade fails with
- * SQLITE_BUSY_SNAPSHOT -- a state no retry can clear, with the unit of work half done.
+ * PowerSync writes over its own connection from a worker thread,
+ * so it is a writer the lease cannot serialize.
+ * Under write-ahead logging (WAL),
+ * a deferred BEGIN pins a read snapshot on the first read.
+ * If another connection commits before our upgrade to writer,
+ * the upgrade fails with SQLITE_BUSY_SNAPSHOT.
+ * No retry can clear that state, and the unit of work is left half done.
  *
- * BEGIN IMMEDIATE takes the write lock up front, so the loser is whoever arrives second,
- * at BEGIN, having done nothing, with a plain SQLITE_BUSY that retries cleanly.
+ * BEGIN IMMEDIATE takes the write lock up front.
+ * The loser is then whoever arrives second, at BEGIN, having done nothing,
+ * and it fails with a plain SQLITE_BUSY that retries cleanly.
  */
 describe("sqlite driver > begin immediate", () => {
     let connections: DataSource[]
@@ -52,8 +56,9 @@ describe("sqlite driver > begin immediate", () => {
                     expect(
                         control.filter((s) => /^\s*BEGIN IMMEDIATE/i.test(s)),
                     ).to.have.length(1)
-                    // The rewrite is keyed off upstream's exact literal, so if upstream ever
-                    // changes it this assertion is what tells us the rewrite stopped firing.
+                    // The rewrite is keyed off upstream's exact literal.
+                    // If upstream ever changes the literal,
+                    // this assertion reports that the rewrite stopped firing.
                     expect(
                         control.filter((s) => /^\s*BEGIN TRANSACTION/i.test(s)),
                     ).to.have.length(0)
@@ -86,8 +91,9 @@ describe("sqlite driver > begin immediate", () => {
                     await manager.save(Thing, { name: "mine" })
                 })
 
-                // We hold the write lock for the whole transaction, so the other writer is the
-                // one turned away -- and with a code that is safe to retry.
+                // We hold the write lock for the whole transaction,
+                // so the other writer is the one turned away,
+                // and with a code that is safe to retry.
                 expect(competingWriterCode).to.match(/^SQLITE_BUSY$/)
 
                 const names = (await connection.getRepository(Thing).find())

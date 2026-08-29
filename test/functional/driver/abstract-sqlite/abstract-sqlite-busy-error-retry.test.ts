@@ -157,9 +157,9 @@ describe("sqlite driver > busy error retry > transaction boundaries", () => {
                 const log = captureLog(connection)
                 const runner = connection.createQueryRunner()
                 try {
-                    // BEGIN IMMEDIATE runs at depth 0, so the retry rule covers it. This is
-                    // the whole point of taking the write lock up front: the unit of work
-                    // either starts or it does not, never half.
+                    // BEGIN IMMEDIATE runs at depth 0, so the retry rule covers it.
+                    // The unit of work either starts whole or not at all,
+                    // which is the point of taking the write lock up front.
                     const pending = runner.startTransaction()
 
                     await new Promise((ok) => setTimeout(ok, 150))
@@ -186,9 +186,10 @@ describe("sqlite driver > busy error retry > event loop", () => {
             (connections = await createTestingConnections({
                 entities: [],
                 enabledDrivers: SQLITE_DRIVERS,
-                // A production-shaped config: a real busy timeout, not the 0 the older tests
-                // used. better-sqlite3 blocks inside C for this on every attempt, so it is
-                // the term that decides whether retrying freezes the process.
+                // A production-shaped config with a real busy timeout, not 0.
+                // better-sqlite3 blocks inside C for the busy timeout on every attempt,
+                // so that term decides whether retrying freezes the process.
+                // A config that zeroes it would hide the freeze this test exists to catch.
                 driverSpecific: {
                     timeout: 200,
                     busyTimeout: 200,
@@ -208,8 +209,9 @@ describe("sqlite driver > busy error retry > event loop", () => {
                 const ticker = setInterval(() => ticks++, 10)
                 try {
                     await connection.query(WRITE_QUERY).should.be.rejected
-                    // With the driver's default 5000ms busy timeout this is near zero, which
-                    // is what made a "200ms" retry budget really cost 16 seconds.
+                    // With the driver's default 5000ms busy timeout the tick count lands
+                    // near zero, which is what made a nominal 200ms retry budget really
+                    // cost 16 seconds.
                     expect(ticks).to.be.greaterThan(3)
                 } finally {
                     clearInterval(ticker)
@@ -257,10 +259,11 @@ describe("sqlite driver > busy error retry > commit", () => {
                     await runner.startTransaction()
                     await runner.query(WRITE_QUERY)
 
-                    // A read transaction holds a SHARED lock, which in rollback-journal mode
-                    // stops our COMMIT taking EXCLUSIVE. COMMIT has to be retried: leaving the
-                    // transaction open would make the next runner's BEGIN fail with
-                    // SQLITE_ERROR, which is not busy and so is never retried.
+                    // A read transaction holds a SHARED lock,
+                    // and in rollback-journal mode that stops our COMMIT taking EXCLUSIVE.
+                    // COMMIT has to be retried:
+                    // a transaction left open would fail the next runner's BEGIN
+                    // with SQLITE_ERROR, which is not a busy error and is never retried.
                     await reader.exec("BEGIN")
                     await reader.exec("SELECT count(*) FROM sqlite_master")
                     readerOpen = true

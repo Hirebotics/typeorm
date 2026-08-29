@@ -3,13 +3,14 @@ import { DataSource } from "../../../../src"
 /**
  * Shared helpers for the sqlite connection-lease tests.
  *
- * Not a *.test.ts file on purpose: beacon/test.sh names the compiled test files it runs, and
- * this one has no tests of its own.
+ * Not a *.test.ts file on purpose:
+ * beacon/test.sh names the compiled test files it runs, and this one has no tests of its own.
  */
 
 /**
- * `PRAGMA user_version = N` writes the database header, so it needs the same write lock an
- * INSERT does, which makes it the cheapest way to provoke SQLITE_BUSY.
+ * `PRAGMA user_version = N` writes the database header,
+ * so it needs the same write lock an INSERT does.
+ * That makes it the cheapest way to provoke SQLITE_BUSY.
  */
 export const WRITE_QUERY = "PRAGMA user_version = 7"
 
@@ -22,13 +23,14 @@ export const OTHER_WRITE_QUERY = "PRAGMA user_version = 11"
 /**
  * A second handle on the same file, standing in for another process.
  *
- * It has to be opened with the *same* sqlite library as the driver under test. Two different
- * builds of sqlite in one process cannot block each other at all: file locks are POSIX advisory
- * locks, which never conflict within a process, and sqlite's own in-process lock table is
- * per-library. A better-sqlite3 handle would write straight through a node-sqlite3 transaction,
+ * It has to be opened with the *same* sqlite library as the driver under test.
+ * Two different builds of sqlite in one process cannot block each other at all:
+ * file locks are POSIX advisory locks, which never conflict within a process,
+ * and sqlite's own in-process lock table is per-library.
+ * A better-sqlite3 handle would write straight through a node-sqlite3 transaction,
  * so a test written that way silently measures nothing.
  *
- * The busy timeout is 0 so this handle never waits on a lock either.
+ * The busy timeout is 0, so this handle never waits on a lock either.
  */
 export interface SecondHandle {
     exec(sql: string): Promise<void>
@@ -91,8 +93,8 @@ export async function lockDatabase(
 }
 
 /**
- * Collects what the query runner logs, so retries and lease behaviour can be asserted
- * without depending on wall-clock timing.
+ * Collects what the query runner logs,
+ * so retries and lease behaviour can be asserted without depending on wall-clock timing.
  */
 export function captureLog(connection: DataSource) {
     const messages: string[] = []
@@ -119,8 +121,8 @@ export function captureLog(connection: DataSource) {
 }
 
 /**
- * Collects the SQL the connection logs, so the statements a unit of work really issued
- * can be asserted.
+ * Collects the SQL the connection logs,
+ * so the statements a unit of work really issued can be asserted.
  */
 export function captureSql(connection: DataSource) {
     const statements: string[] = []

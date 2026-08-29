@@ -27,3 +27,4 @@ node_modules/
 ormlogs.log
 
 /test/github-issues/799/tmp/*
+.claude/worktrees/

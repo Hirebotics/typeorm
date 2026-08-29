@@ -60,10 +60,6 @@ export abstract class AbstractSqliteQueryRunner
 
     /**
      * Releases used database connection.
-     *
-     * Only clears in-memory state, because sqlite has one connection and there is no pool to
-     * hand it back to. Note that one connection does not mean one query runner: a query runner
-     * owns a transaction, so concurrent units of work each need their own.
      */
     release(): Promise<void> {
         this.loadedTables = []

@@ -37,8 +37,9 @@ export interface SqliteConnectionOptions extends BaseDataSourceOptions {
      * Time in milliseconds.
      *
      * @deprecated Retries forever, and only on this driver.
-     * Use busyErrorRetryInterval and busyErrorRetryLimit instead, which are bounded and
-     * work the same way on better-sqlite3. Setting both arms two stacked retry loops.
+     * Use busyErrorRetryInterval and busyErrorRetryLimit instead:
+     * they are bounded, and they work the same way on better-sqlite3.
+     * Setting both arms two stacked retry loops.
      */
     readonly busyErrorRetry?: number
 
@@ -70,13 +71,6 @@ export interface SqliteConnectionOptions extends BaseDataSourceOptions {
      * Milliseconds to wait before retrying a statement that failed with SQLITE_BUSY.
      * Sqlite allows one writer at a time, so concurrent writes surface as SQLITE_BUSY.
      *
-     * Waits asynchronously, unlike the driver's own busy timeout, so it does not block the
-     * event loop while waiting.
-     *
-     * Statements inside a transaction are not retried: sqlite has already rolled the failed
-     * statement back, so retrying just that one would commit a partial unit of work.
-     * COMMIT and ROLLBACK are retried, since both can legitimately return SQLITE_BUSY.
-     *
      * Default: 0, meaning no retries.
      */
     readonly busyErrorRetryInterval?: number
@@ -91,13 +85,6 @@ export interface SqliteConnectionOptions extends BaseDataSourceOptions {
 
     /**
      * Milliseconds a query runner waits for exclusive use of the connection before failing.
-     *
-     * Sqlite has one connection, so query runners take turns holding it for the length of
-     * their transaction. This wait has to outlast the holder's whole retry budget, or a
-     * waiter gives up on a holder that is still making progress.
-     *
-     * Defaults to the worst-case retry budget scaled for a few contending runners,
-     * and never less than 30000.
      */
     readonly connectionLeaseTimeout?: number
 }

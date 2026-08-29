@@ -65,9 +65,10 @@ describe("sqlite driver > query runner ownership", () => {
                         await connection.getRepository(Thing).find()
                     ).map((thing) => thing.name)
 
-                    // Before the lease both units of work shared one runner, so the second
-                    // one's insert became a savepoint inside the first one's transaction and
-                    // died with its ROLLBACK -- while its caller was told it had succeeded.
+                    // Before the lease both units of work shared one runner,
+                    // so the second one's insert became a savepoint inside the
+                    // first one's transaction and died with its ROLLBACK,
+                    // while its caller was told it had succeeded.
                     expect(names).to.eql(["committed"])
 
                     const control = sql.transactionControl()
@@ -131,8 +132,9 @@ describe("sqlite driver > query runner ownership", () => {
                     })(),
                 ])
 
-                // Sqlite has one connection, so any statement issued while a transaction is
-                // open is inside it. The reader has to wait rather than join.
+                // Sqlite has one connection,
+                // so any statement issued while a transaction is open is inside that transaction.
+                // The reader has to wait rather than join.
                 expect(seenByOther).to.not.include("uncommitted")
             }),
         ))
@@ -163,8 +165,9 @@ describe("sqlite driver > query runner ownership", () => {
     it("should serialize an implicit save() transaction against an explicit one", () =>
         Promise.all(
             connections.map(async (connection) => {
-                // EntityPersistExecutor opens its own transaction, so a bare save() is a unit
-                // of work in its own right, not a statement that can join someone else's.
+                // EntityPersistExecutor opens its own transaction,
+                // so a bare save() is a unit of work in its own right,
+                // not a statement that can join a transaction another caller opened.
                 const results = await Promise.allSettled([
                     connection.transaction(async (manager) => {
                         await manager.save(Thing, { name: "explicit" })
@@ -207,8 +210,9 @@ describe("sqlite driver > query runner ownership > lease timeout", () => {
 
                 try {
                     await connection.transaction(async () => {
-                        // Reaching past the transaction's own manager for a fresh runner is
-                        // the shape of the bug in cloud-connector's doWithQueryRunner.
+                        // Reaching past the transaction's own manager for a fresh runner
+                        // makes the new runner wait on its own caller,
+                        // and that caller can never release.
                         const independent = connection.createQueryRunner()
                         try {
                             await independent.query("SELECT 1")
