@@ -8,9 +8,12 @@ import { SqliteQueryRunner } from "./SqliteQueryRunner"
 /**
  * SqliteQueryRunner serialized against the driver's single connection.
  * See SqliteConnectionLease.ts for the rationale.
+ * Hirebotics file, not part of upstream TypeORM.
  */
 export class SerializedSqliteQueryRunner extends SqliteQueryRunner {
-    /** The inherited protected property, widened to public. */
+    /**
+     * Expose the inherited protected property so the connection lease can see it.
+     */
     declare transactionDepth: number
 
     private leaseHolder = new SqliteLeaseHolder(this)

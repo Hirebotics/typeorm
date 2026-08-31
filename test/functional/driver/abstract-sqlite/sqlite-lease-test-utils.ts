@@ -8,6 +8,15 @@ import { DataSource, QueryRunner } from "../../../../src"
  * beacon/test.sh names the compiled test files it runs, and this one has no tests of its own.
  */
 
+/** The drivers every suite in this directory runs against. */
+export const SQLITE_DRIVERS: ("sqlite" | "better-sqlite3")[] = [
+    "sqlite",
+    "better-sqlite3",
+]
+
+/** The entity files every suite in this directory loads. */
+export const TEST_ENTITIES = [__dirname + "/entity/*{.js,.ts}"]
+
 /**
  * `PRAGMA user_version = N` writes the database header,
  * so it needs the same write lock an INSERT does.

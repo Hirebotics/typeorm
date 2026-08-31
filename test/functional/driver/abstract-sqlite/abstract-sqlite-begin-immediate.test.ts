@@ -11,14 +11,15 @@ import {
     captureSql,
     expectBothSqliteDrivers,
     openSecondHandle,
+    SQLITE_DRIVERS,
+    TEST_ENTITIES,
 } from "./sqlite-lease-test-utils"
 
 /**
  * Why the driver rewrites BEGIN to BEGIN IMMEDIATE.
  *
- * Another connection can write the same database (for example a sync engine
- * running in a worker thread), and the lease cannot serialize a writer it
- * does not manage.
+ * Another connection can write the same database, such as a sync engine in a worker thread.
+ * The lease cannot serialize a writer it does not manage.
  * Under write-ahead logging (WAL),
  * a deferred BEGIN pins a read snapshot on the first read.
  * If another connection commits before our upgrade to writer,
@@ -33,8 +34,8 @@ describe("sqlite driver > begin immediate", () => {
     let connections: DataSource[]
     before(async () => {
         connections = await createTestingConnections({
-            entities: [__dirname + "/entity/*{.js,.ts}"],
-            enabledDrivers: ["sqlite", "better-sqlite3"],
+            entities: TEST_ENTITIES,
+            enabledDrivers: SQLITE_DRIVERS,
             driverSpecific: { enableWAL: true },
         })
         expectBothSqliteDrivers(connections)

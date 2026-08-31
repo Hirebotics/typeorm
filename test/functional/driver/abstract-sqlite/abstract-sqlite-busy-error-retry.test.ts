@@ -12,13 +12,9 @@ import {
     expectBothSqliteDrivers,
     lockDatabase,
     openSecondHandle,
+    SQLITE_DRIVERS,
     WRITE_QUERY,
 } from "./sqlite-lease-test-utils"
-
-const SQLITE_DRIVERS: ("sqlite" | "better-sqlite3")[] = [
-    "sqlite",
-    "better-sqlite3",
-]
 
 describe("sqlite driver > busy error retry", () => {
     let connections: DataSource[]
@@ -201,8 +197,8 @@ describe("sqlite driver > busy error retry > no retry configured", () => {
 
                     await release()
 
-                    // Completes promptly only if the failed BEGIN freed the lease
-                    // instead of holding it to the lease timeout.
+                    // A prompt completion proves the failed BEGIN freed the lease.
+                    // A slow one means the lease was held until its timeout.
                     const startedAt = Date.now()
                     await connection.query(WRITE_QUERY)
                     expect(Date.now() - startedAt).to.be.lessThan(5000)
@@ -251,8 +247,8 @@ describe("sqlite driver > busy error retry > deadline reached", () => {
                         failure = err as Error
                     }
 
-                    // Rejects with the sqlite error itself, not a synthetic
-                    // gave-up error, once the wall-clock budget is spent.
+                    // Once the wall-clock budget is spent,
+                    // rejects with the sqlite error itself, not a synthetic gave-up error.
                     expect(failure).to.be.instanceOf(QueryFailedError)
                     expect(String(failure)).to.match(/database is locked/i)
                     expect(log.getRetryCount()).to.be.greaterThan(0)
@@ -345,9 +341,8 @@ describe("sqlite driver > busy error retry > event loop", () => {
                 }, 10)
                 try {
                     await connection.query(WRITE_QUERY).should.be.rejected
-                    // With the driver's default 5000ms busy timeout the tick count lands
-                    // near zero, which is what made a nominal 200ms retry budget really
-                    // cost 16 seconds.
+                    // With the driver's default 5000ms busy timeout the tick count lands near zero.
+                    // That is what made a nominal 200ms retry budget really cost 16 seconds.
                     expect(tickCount).to.be.greaterThan(3)
                 } finally {
                     clearInterval(ticker)

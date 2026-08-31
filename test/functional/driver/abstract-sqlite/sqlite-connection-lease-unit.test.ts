@@ -1,6 +1,5 @@
 import { expect } from "chai"
 import {
-    isBusyError,
     SqliteConnectionLease,
     SqliteLeaseHolder,
 } from "../../../../src/driver/sqlite-abstract/SqliteConnectionLease"
@@ -20,8 +19,8 @@ describe("sqlite driver > connection lease", () => {
         const lease = new SqliteConnectionLease()
         await lease.acquire("A", 100)
 
-        // .then instead of await: awaiting would block this test on the very
-        // grants whose order it records.
+        // .then instead of await:
+        // awaiting would block this test on the very grants whose order it records.
         const order: string[] = []
         const b = lease.acquire("B", 1000).then(() => {
             order.push("B")
@@ -57,14 +56,14 @@ describe("sqlite driver > connection lease", () => {
         const lease = new SqliteConnectionLease()
         await lease.acquire("A", 100)
 
-        // .then instead of await: awaiting would serialize the concurrency
-        // this test measures.
+        // .then instead of await:
+        // awaiting would serialize the concurrency this test measures.
         const order: string[] = []
         const b = lease.acquire("B", 1000).then(() => {
             order.push("B")
         })
         lease.release()
-        // B is granted but has not resumed yet; D must queue behind it.
+        // B is granted but has not resumed yet, so D must queue behind it.
         const d = lease.acquire("D", 1000).then(() => {
             order.push("D")
         })
@@ -86,39 +85,39 @@ describe("sqlite driver > connection lease", () => {
     })
 })
 
+/**
+ * The smallest object that satisfies what SqliteLeaseHolder reads off its runner.
+ * Each call makes a fresh driver object, so each test gets its own lease.
+ * Deliberately partial: the cast confines the untyped surface to this one helper.
+ */
+function createStubRunner(
+    overrides: Record<string, unknown> = {},
+): SqliteLeasedQueryRunner {
+    return {
+        driver: {
+            options: {
+                busyErrorRetryInterval: 1,
+                busyErrorRetryTimeout: 100,
+            },
+        },
+        connection: {
+            logger: {
+                log: () => {
+                    return undefined
+                },
+            },
+        },
+        isTransactionActive: false,
+        isReleased: false,
+        transactionDepth: 0,
+        ...overrides,
+    } as unknown as SqliteLeasedQueryRunner
+}
+
 describe("sqlite driver > connection lease > busy retry gate", () => {
     /**
-     * The smallest object that satisfies what SqliteLeaseHolder reads off its runner.
-     * Each call makes a fresh driver object, so each test gets its own lease.
-     * Deliberately partial: the cast confines the untyped surface to this one helper.
-     */
-    function createStubRunner(
-        overrides: Record<string, unknown> = {},
-    ): SqliteLeasedQueryRunner {
-        return {
-            driver: {
-                options: {
-                    busyErrorRetryInterval: 1,
-                    busyErrorRetryTimeout: 100,
-                },
-            },
-            connection: {
-                logger: {
-                    log: () => {
-                        return undefined
-                    },
-                },
-            },
-            isTransactionActive: false,
-            isReleased: false,
-            transactionDepth: 0,
-            ...overrides,
-        } as unknown as SqliteLeasedQueryRunner
-    }
-
-    /**
-     * Makes an executeStatement stub that fails with SQLITE_BUSY the first
-     * failureCount calls, then succeeds.
+     * Makes an executeStatement stub.
+     * It fails with SQLITE_BUSY the first failureCount calls, then succeeds.
      */
     function createBusyFailingExecute(failureCount: number): {
         executeStatement: () => Promise<string>
@@ -247,26 +246,77 @@ describe("sqlite driver > connection lease > busy retry gate", () => {
     })
 })
 
-describe("sqlite driver > connection lease > isBusyError", () => {
-    it("should match the three shapes sqlite errors arrive in", () => {
-        expect(isBusyError({ code: "SQLITE_BUSY" })).to.equal(true)
-        expect(
-            isBusyError({ driverError: { code: "SQLITE_BUSY_SNAPSHOT" } }),
-        ).to.equal(true)
-        expect(
-            isBusyError(new Error("SQLITE_BUSY: database is locked")),
-        ).to.equal(true)
-    })
+describe("sqlite driver > connection lease > retryable error shapes", () => {
+    /**
+     * Makes an executeStatement stub that fails once with the given error, then succeeds.
+     */
+    function createFailOnceExecute(error: unknown): {
+        executeStatement: () => Promise<string>
+        getCallCount: () => number
+    } {
+        let callCount = 0
+        return {
+            executeStatement: () => {
+                callCount += 1
+                if (callCount === 1) {
+                    return Promise.reject(error)
+                }
+                return Promise.resolve("ok")
+            },
+            getCallCount: () => {
+                return callCount
+            },
+        }
+    }
 
-    it("should not match other sqlite errors", () => {
-        expect(
-            isBusyError({
-                code: "SQLITE_ERROR",
-                message: "no such table: thing",
-            }),
-        ).to.equal(false)
-        expect(
-            isBusyError(new Error("database disk image is malformed")),
-        ).to.equal(false)
-    })
+    const busyShapes: [string, unknown][] = [
+        ["a code property", { code: "SQLITE_BUSY" }],
+        [
+            "a wrapped driverError code",
+            { driverError: { code: "SQLITE_BUSY_SNAPSHOT" } },
+        ],
+        ["only a message", new Error("SQLITE_BUSY: database is locked")],
+    ]
+
+    for (const [shape, error] of busyShapes) {
+        it(`should retry a busy error carrying ${shape}`, async () => {
+            const leaseHolder = new SqliteLeaseHolder(createStubRunner())
+            const { executeStatement, getCallCount } =
+                createFailOnceExecute(error)
+
+            await leaseHolder.run(
+                "UPDATE thing SET name = 'x'",
+                executeStatement,
+            )
+            expect(getCallCount()).to.equal(2)
+        })
+    }
+
+    const otherErrors: [string, unknown][] = [
+        [
+            "another sqlite code",
+            { code: "SQLITE_ERROR", message: "no such table: thing" },
+        ],
+        ["an unrelated message", new Error("database disk image is malformed")],
+    ]
+
+    for (const [shape, error] of otherErrors) {
+        it(`should not retry ${shape}`, async () => {
+            const leaseHolder = new SqliteLeaseHolder(createStubRunner())
+            const { executeStatement, getCallCount } =
+                createFailOnceExecute(error)
+
+            let hasFailed = false
+            try {
+                await leaseHolder.run(
+                    "UPDATE thing SET name = 'x'",
+                    executeStatement,
+                )
+            } catch {
+                hasFailed = true
+            }
+            expect(hasFailed).to.equal(true)
+            expect(getCallCount()).to.equal(1)
+        })
+    }
 })

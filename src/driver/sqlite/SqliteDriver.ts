@@ -63,10 +63,11 @@ export class SqliteDriver extends AbstractSqliteDriver {
      * Creates a query runner used to execute database queries.
      */
     createQueryRunner(mode: ReplicationMode): QueryRunner {
-        // One runner per caller, not one per driver.
-        // A query runner owns a transaction,
-        // so sharing one lets two units of work collide in one transaction and lose writes.
-        // The serialized runner leases the connection.
+        // Hirebotics patch: a fresh runner per caller, not upstream's one cached runner.
+        // A query runner owns a transaction.
+        // A shared runner lets two units of work collide in one transaction and lose writes.
+        // The serialized runner leases the single connection.
+        // Keep this override when merging upstream.
         return new SerializedSqliteQueryRunner(this)
     }
 

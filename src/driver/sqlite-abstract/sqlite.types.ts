@@ -1,6 +1,11 @@
 import { AbstractSqliteQueryRunner } from "./AbstractSqliteQueryRunner"
 
 /**
+ * Shared shapes for the sqlite connection lease.
+ * Hirebotics file, not part of upstream TypeORM.
+ */
+
+/**
  * Options for the lease and the busy retry.
  */
 export interface SqliteLeaseOptions {
@@ -32,8 +37,8 @@ export interface SqliteLeaseOptions {
 /**
  * A sqlite query runner with `transactionDepth` widened from protected to public.
  *
- * The lease machinery lives outside the runner class hierarchy and needs
- * access to the transaction depth to determine whether a transaction is active.
+ * The lease machinery lives outside the runner class hierarchy
+ * and needs the transaction depth to determine whether a transaction is active.
  */
 export type SqliteLeasedQueryRunner = AbstractSqliteQueryRunner & {
     transactionDepth: number

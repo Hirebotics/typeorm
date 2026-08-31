@@ -12,18 +12,15 @@ import {
     captureLog,
     captureSql,
     expectBothSqliteDrivers,
+    SQLITE_DRIVERS,
+    TEST_ENTITIES,
 } from "./sqlite-lease-test-utils"
-
-const SQLITE_DRIVERS: ("sqlite" | "better-sqlite3")[] = [
-    "sqlite",
-    "better-sqlite3",
-]
 
 describe("sqlite driver > query runner ownership", () => {
     let connections: DataSource[]
     before(async () => {
         connections = await createTestingConnections({
-            entities: [__dirname + "/entity/*{.js,.ts}"],
+            entities: TEST_ENTITIES,
             enabledDrivers: SQLITE_DRIVERS,
         })
         expectBothSqliteDrivers(connections)
@@ -81,10 +78,10 @@ describe("sqlite driver > query runner ownership", () => {
                         return thing.name
                     })
 
-                    // Before the lease both units of work shared one runner,
-                    // so the second one's insert became a savepoint inside the
-                    // first one's transaction and died with its ROLLBACK,
-                    // while its caller was told it had succeeded.
+                    // Before the lease both units of work shared one runner.
+                    // The second insert became a savepoint inside the first transaction,
+                    // it died with that transaction's ROLLBACK,
+                    // and its caller was told it had succeeded.
                     expect(names).to.eql(["committed"])
 
                     const control = sql.getTransactionControlStatements()
@@ -203,8 +200,8 @@ describe("sqlite driver > query runner ownership", () => {
     it("should roll back and free the connection when a runner with a raw BEGIN is released", () => {
         return Promise.all(
             connections.map(async (connection) => {
-                // A raw BEGIN opens a transaction in sqlite without setting any
-                // runner flag, so teardown has to track it separately.
+                // A raw BEGIN opens a transaction in sqlite without setting any runner flag.
+                // Teardown has to track it separately.
                 const log = captureLog(connection)
                 const runner = connection.createQueryRunner()
                 try {
@@ -254,8 +251,9 @@ describe("sqlite driver > query runner ownership", () => {
         return Promise.all(
             connections.map(async (connection) => {
                 // Upstream clears isTransactionActive when a BeforeTransactionStart
-                // subscriber throws, even on a nested begin with the outer transaction
-                // still open in sqlite. Teardown must still see and roll it back.
+                // subscriber throws.
+                // On a nested begin the outer transaction is still open in sqlite.
+                // Teardown must still see it and roll it back.
                 const log = captureLog(connection)
                 let shouldThrowOnNestedBegin = false
                 const subscriber: EntitySubscriberInterface = {
@@ -339,8 +337,8 @@ describe("sqlite driver > query runner ownership", () => {
     })
 
     it("should not share the lease between data sources", async () => {
-        // A regression to one module-global lease would serialize unrelated
-        // databases and can deadlock an app coordinating two of them.
+        // A regression to one module-global lease would serialize unrelated databases.
+        // It can deadlock an app coordinating two of them.
         expect(connections.length).to.be.greaterThan(1)
         const [first, second] = connections
         const runner = first.createQueryRunner()
@@ -362,7 +360,7 @@ describe("sqlite driver > query runner ownership > lease timeout", () => {
     let connections: DataSource[]
     before(async () => {
         connections = await createTestingConnections({
-            entities: [__dirname + "/entity/*{.js,.ts}"],
+            entities: TEST_ENTITIES,
             enabledDrivers: SQLITE_DRIVERS,
             driverSpecific: { connectionLeaseTimeout: 500 },
         })
@@ -411,8 +409,9 @@ describe("sqlite driver > query runner ownership > lease timeout", () => {
     it("should share one acquisition across concurrent statements on one runner", () => {
         return Promise.all(
             connections.map(async (connection) => {
-                // A regression to per-statement acquire would make the second
-                // statement queue behind its own runner and time out.
+                // A regression to per-statement acquire self-deadlocks:
+                // the second statement queues behind its own runner and times out.
+                // The in-transaction pair is the case that catches it.
                 const runner = connection.createQueryRunner()
                 try {
                     await Promise.all([

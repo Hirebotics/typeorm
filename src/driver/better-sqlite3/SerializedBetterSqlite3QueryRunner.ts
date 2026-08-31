@@ -8,10 +8,11 @@ import { BetterSqlite3QueryRunner } from "./BetterSqlite3QueryRunner"
 /**
  * BetterSqlite3QueryRunner serialized against the driver's single connection.
  * See SqliteConnectionLease.ts for the rationale.
+ * Hirebotics file, not part of upstream TypeORM.
  */
 export class SerializedBetterSqlite3QueryRunner extends BetterSqlite3QueryRunner {
     /**
-     * The inherited protected property, widened to public.
+     * Expose the inherited protected property so the connection lease can see it.
      */
     declare transactionDepth: number
 
@@ -60,9 +61,9 @@ export class SerializedBetterSqlite3QueryRunner extends BetterSqlite3QueryRunner
     }
 
     /**
-     * Routed through query() so the lease and the retry cover the pragma. Upstream
-     * calls databaseConnection.pragma() directly, which skips both and blocks the
-     * event loop inside better-sqlite3's synchronous busy timeout.
+     * Routed through query() so the lease and the retry cover the pragma.
+     * Upstream calls databaseConnection.pragma() directly, which skips both
+     * and blocks the event loop inside better-sqlite3's synchronous busy timeout.
      */
     async beforeMigration(): Promise<void> {
         await this.query(`PRAGMA foreign_keys = OFF`)
@@ -73,9 +74,10 @@ export class SerializedBetterSqlite3QueryRunner extends BetterSqlite3QueryRunner
     }
 
     /**
-     * Same reason. Reimplemented rather than delegated to super: the abstract version
-     * drops the attached-database prefix, so delegating would silently lose
-     * attached-database support.
+     * Same reason.
+     * Reimplemented rather than delegated to super:
+     * the abstract version drops the attached-database prefix,
+     * so delegating would silently lose attached-database support.
      */
     protected async loadPragmaRecords(
         tablePath: string,
