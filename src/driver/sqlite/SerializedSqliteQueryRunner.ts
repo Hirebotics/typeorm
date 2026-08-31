@@ -1,8 +1,5 @@
 import { IsolationLevel } from "../types/IsolationLevel"
-import {
-    SqliteLeaseHolder,
-    toImmediateBegin,
-} from "../sqlite-abstract/SqliteConnectionLease"
+import { SqliteLeaseHolder } from "../sqlite-abstract/SqliteConnectionLease"
 import { SqliteQueryRunner } from "./SqliteQueryRunner"
 
 /**
@@ -23,8 +20,7 @@ export class SerializedSqliteQueryRunner extends SqliteQueryRunner {
         parameters?: any[],
         useStructuredResult = false,
     ): Promise<any> {
-        const sql = toImmediateBegin(query)
-        return this.leaseHolder.run(sql, () => {
+        return this.leaseHolder.run(query, (sql) => {
             return super.query(sql, parameters, useStructuredResult)
         })
     }

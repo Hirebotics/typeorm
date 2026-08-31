@@ -141,7 +141,7 @@ function getLease(driver: AbstractSqliteDriver): SqliteConnectionLease {
  *
  * @see https://sqlite.org/lang_transaction.html
  */
-export function toImmediateBegin(query: string): string {
+function toImmediateBegin(query: string): string {
     if (query === "BEGIN TRANSACTION") {
         return "BEGIN IMMEDIATE"
     }
@@ -315,8 +315,13 @@ export class SqliteLeaseHolder {
 
     /**
      * Runs one statement under the lease, retrying while sqlite reports the database busy.
+     * The statement may be rewritten first, so executeStatement must run the sql it receives.
      */
-    async run<T>(sql: string, executeStatement: () => Promise<T>): Promise<T> {
+    async run<T>(
+        query: string,
+        executeStatement: (sql: string) => Promise<T>,
+    ): Promise<T> {
+        const sql = toImmediateBegin(query)
         // Keep the increment immediately before the try.
         // If it moves inside and a throw above it skips it, the finally still decrements.
         // The undercount then frees the lease while a statement is still running.
@@ -334,7 +339,7 @@ export class SqliteLeaseHolder {
             let deadline: number | undefined
             while (true) {
                 try {
-                    const result = await executeStatement()
+                    const result = await executeStatement(sql)
                     this.trackRawTransactionControl(sql)
                     return result
                 } catch (err) {
