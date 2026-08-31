@@ -70,9 +70,8 @@ export class SerializedBetterSqlite3QueryRunner extends BetterSqlite3QueryRunner
     }
 
     /**
-     * Same reason.
-     * Reimplemented rather than delegated to super:
-     * the abstract version drops the attached-database prefix,
+     * Routed through query() so the lease and the retry cover the pragma.
+     * Upstream drops the attached-database prefix,
      * so delegating would silently lose attached-database support.
      */
     protected async loadPragmaRecords(
