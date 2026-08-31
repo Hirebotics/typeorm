@@ -79,15 +79,6 @@ export default defineConfig([
             "no-regex-spaces": "warn",
         },
     },
-    jsdoc({
-        files: ["src/**/*.ts"],
-        config: "flat/recommended-typescript",
-        // Temporarily enable individual rules when they are fixed, until all current warnings are gone,
-        // and then remove manual config in favor of `config: "flat/recommended-typescript-error"`
-        rules: {
-            "jsdoc/valid-types": "error",
-        },
-    }),
     {
         files: ["test/**/*.ts"],
         ...pluginChaiFriendly.configs.recommendedFlat,

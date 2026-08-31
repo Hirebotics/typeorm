@@ -7,13 +7,18 @@ import {
     reloadTestingDatabases,
 } from "../../../utils/test-utils"
 import { Thing } from "./entity/Thing"
-import { captureSql, openSecondHandle } from "./sqlite-lease-test-utils"
+import {
+    captureSql,
+    expectBothSqliteDrivers,
+    openSecondHandle,
+} from "./sqlite-lease-test-utils"
 
 /**
  * Why the driver rewrites BEGIN to BEGIN IMMEDIATE.
  *
- * PowerSync writes over its own connection from a worker thread,
- * so it is a writer the lease cannot serialize.
+ * Another connection can write the same database (for example a sync engine
+ * running in a worker thread), and the lease cannot serialize a writer it
+ * does not manage.
  * Under write-ahead logging (WAL),
  * a deferred BEGIN pins a read snapshot on the first read.
  * If another connection commits before our upgrade to writer,
@@ -26,15 +31,17 @@ import { captureSql, openSecondHandle } from "./sqlite-lease-test-utils"
  */
 describe("sqlite driver > begin immediate", () => {
     let connections: DataSource[]
-    before(
-        async () =>
-            (connections = await createTestingConnections({
-                entities: [__dirname + "/entity/*{.js,.ts}"],
-                enabledDrivers: ["sqlite", "better-sqlite3"],
-                driverSpecific: { enableWAL: true },
-            })),
-    )
-    beforeEach(() => reloadTestingDatabases(connections))
+    before(async () => {
+        connections = await createTestingConnections({
+            entities: [__dirname + "/entity/*{.js,.ts}"],
+            enabledDrivers: ["sqlite", "better-sqlite3"],
+            driverSpecific: { enableWAL: true },
+        })
+        expectBothSqliteDrivers(connections)
+    })
+    beforeEach(() => {
+        return reloadTestingDatabases(connections)
+    })
     after(async () => {
         // WAL is a property of the file, so leave it as the other suites expect to find it.
         for (const connection of connections) {
@@ -43,8 +50,8 @@ describe("sqlite driver > begin immediate", () => {
         await closeTestingConnections(connections)
     })
 
-    it("should open transactions with BEGIN IMMEDIATE", () =>
-        Promise.all(
+    it("should open transactions with BEGIN IMMEDIATE", () => {
+        return Promise.all(
             connections.map(async (connection) => {
                 const sql = captureSql(connection)
                 try {
@@ -52,24 +59,29 @@ describe("sqlite driver > begin immediate", () => {
                         await manager.save(Thing, { name: "written" })
                     })
 
-                    const control = sql.transactionControl()
+                    const control = sql.getTransactionControlStatements()
                     expect(
-                        control.filter((s) => /^\s*BEGIN IMMEDIATE/i.test(s)),
+                        control.filter((s) => {
+                            return /^\s*BEGIN IMMEDIATE/i.test(s)
+                        }),
                     ).to.have.length(1)
                     // The rewrite is keyed off upstream's exact literal.
                     // If upstream ever changes the literal,
                     // this assertion reports that the rewrite stopped firing.
                     expect(
-                        control.filter((s) => /^\s*BEGIN TRANSACTION/i.test(s)),
+                        control.filter((s) => {
+                            return /^\s*BEGIN TRANSACTION/i.test(s)
+                        }),
                     ).to.have.length(0)
                 } finally {
                     sql.restore()
                 }
             }),
-        ))
+        )
+    })
 
-    it("should complete a read-then-write transaction while another writer contends", () =>
-        Promise.all(
+    it("should complete a read-then-write transaction while another writer contends", () => {
+        return Promise.all(
             connections.map(async (connection) => {
                 let competingWriterCode = "committed"
 
@@ -82,8 +94,13 @@ describe("sqlite driver > begin immediate", () => {
                         await other.exec(
                             `INSERT INTO thing (name) VALUES ('competing')`,
                         )
-                    } catch (err: any) {
-                        competingWriterCode = err.code ?? err.message
+                    } catch (err) {
+                        const shape = err as {
+                            code?: string
+                            message?: string
+                        }
+                        competingWriterCode =
+                            shape.code ?? shape.message ?? "unknown"
                     } finally {
                         await other.close()
                     }
@@ -97,9 +114,12 @@ describe("sqlite driver > begin immediate", () => {
                 expect(competingWriterCode).to.match(/^SQLITE_BUSY$/)
 
                 const names = (await connection.getRepository(Thing).find())
-                    .map((thing) => thing.name)
+                    .map((thing) => {
+                        return thing.name
+                    })
                     .sort()
                 expect(names).to.eql(["mine"])
             }),
-        ))
+        )
+    })
 })

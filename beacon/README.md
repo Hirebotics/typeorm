@@ -24,12 +24,19 @@ then tears Postgres down and restores your `ormconfig.json`, even on failure or 
 | **sqlite** and **better-sqlite3** | A query runner per caller, leased against the one connection, so concurrent units of work cannot land in a single transaction. Plus `BEGIN IMMEDIATE` and a bounded `SQLITE_BUSY` retry. |
 | **postgres**                      | `onConnect` / `onRelease` pool hooks via `extendPostgresDriver()`. Beacon uses these for per-request row-level security (`SET app.current_tenant`).                                      |
 
-The sqlite work lives in `src/driver/sqlite-abstract/SqliteConnectionLease.ts`.
+The sqlite work lives in four fork-owned files:
+
+-   `src/driver/sqlite-abstract/SqliteConnectionLease.ts`
+-   `src/driver/sqlite-abstract/sqlite.types.ts`
+-   `src/driver/sqlite/SerializedSqliteQueryRunner.ts`
+-   `src/driver/better-sqlite3/SerializedBetterSqlite3QueryRunner.ts`
+
 The only upstream edits are the two `createQueryRunner` bodies and the option declarations,
 which keeps the rebase cost off the files upstream actively rewrites.
 
 Covered by:
 
+-   `test/functional/driver/abstract-sqlite/sqlite-connection-lease-unit.test.ts`
 -   `test/functional/driver/abstract-sqlite/abstract-sqlite-query-runner-ownership.test.ts`
 -   `test/functional/driver/abstract-sqlite/abstract-sqlite-begin-immediate.test.ts`
 -   `test/functional/driver/abstract-sqlite/abstract-sqlite-busy-error-retry.test.ts`
@@ -49,7 +56,7 @@ so a test written that way silently measures nothing.
 `sqlite-lease-test-utils.ts` handles all of that,
 so use `openSecondHandle()` and do not open a handle of your own.
 
-Avoid `timeout: 0`, which is what hid the event-loop freeze.
+Avoid `timeout: 0`: it hides the event-loop freeze the retry tests exist to catch.
 better-sqlite3 blocks inside C for the busy timeout on every attempt,
 so a test that zeroes the timeout never sees the cost that production pays.
 

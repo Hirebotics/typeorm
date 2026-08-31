@@ -1,4 +1,5 @@
-import { DataSource } from "../../../../src"
+import { expect } from "chai"
+import { DataSource, QueryRunner } from "../../../../src"
 
 /**
  * Shared helpers for the sqlite connection-lease tests.
@@ -15,10 +16,16 @@ import { DataSource } from "../../../../src"
 export const WRITE_QUERY = "PRAGMA user_version = 7"
 
 /**
- * A different value, so the other connection's write really changes the database.
- * A commit that changes nothing leaves an open snapshot valid.
+ * Fails the suite when the beacon ormconfig swap or the enabledDrivers filter breaks,
+ * so the driver tests cannot silently pass with an empty connections array.
  */
-export const OTHER_WRITE_QUERY = "PRAGMA user_version = 11"
+export function expectBothSqliteDrivers(connections: DataSource[]): void {
+    const types = connections.map((connection) => {
+        return connection.options.type
+    })
+    expect(types).to.include("sqlite")
+    expect(types).to.include("better-sqlite3")
+}
 
 /**
  * A second handle on the same file, standing in for another process.
@@ -32,19 +39,39 @@ export const OTHER_WRITE_QUERY = "PRAGMA user_version = 11"
  *
  * The busy timeout is 0, so this handle never waits on a lock either.
  */
-export interface SecondHandle {
+export interface SqliteSecondHandle {
     exec(sql: string): Promise<void>
     close(): Promise<void>
 }
 
+/** The better-sqlite3 module is itself the Database constructor. */
+type BetterSqlite3Module = new (path: string, options: { timeout: number }) => {
+    exec(sql: string): void
+    close(): void
+}
+
+interface NodeSqliteDatabase {
+    exec(sql: string, callback: (err: Error | null) => void): void
+    close(callback: () => void): void
+}
+
+interface NodeSqliteModule {
+    Database: new (
+        path: string,
+        callback: (err: Error | null) => void,
+    ) => NodeSqliteDatabase
+}
+
 export async function openSecondHandle(
     connection: DataSource,
-): Promise<SecondHandle> {
-    const sqlite = (connection.driver as unknown as { sqlite: any }).sqlite
-    const database = (connection.options as { database?: string }).database
+): Promise<SqliteSecondHandle> {
+    const sqliteModule = (connection.driver as unknown as { sqlite: unknown })
+        .sqlite
+    const database = (connection.options as { database: string }).database
 
     if (connection.options.type === "better-sqlite3") {
-        const handle = new sqlite(database, { timeout: 0 })
+        const BetterSqlite3 = sqliteModule as BetterSqlite3Module
+        const handle = new BetterSqlite3(database, { timeout: 0 })
         return {
             exec: async (sql: string) => {
                 handle.exec(sql)
@@ -56,21 +83,39 @@ export async function openSecondHandle(
     }
 
     // node-sqlite3: async constructor, callback API throughout.
-    const handle = await new Promise<any>((ok, fail) => {
-        const db = new sqlite.Database(database, (err: any) =>
-            err ? fail(err) : ok(db),
-        )
+    const { Database } = sqliteModule as NodeSqliteModule
+    const handle = await new Promise<NodeSqliteDatabase>((ok, fail) => {
+        const db = new Database(database, (err) => {
+            if (err) {
+                fail(err)
+            } else {
+                ok(db)
+            }
+        })
     })
-    const exec = (sql: string) =>
-        new Promise<void>((ok, fail) =>
-            handle.exec(sql, (err: any) => (err ? fail(err) : ok())),
-        )
+    const exec = (sql: string) => {
+        return new Promise<void>((ok, fail) => {
+            handle.exec(sql, (err) => {
+                if (err) {
+                    fail(err)
+                } else {
+                    ok()
+                }
+            })
+        })
+    }
 
     await exec("PRAGMA busy_timeout = 0")
 
     return {
         exec,
-        close: () => new Promise<void>((ok) => handle.close(() => ok())),
+        close: () => {
+            return new Promise<void>((ok) => {
+                handle.close(() => {
+                    ok()
+                })
+            })
+        },
     }
 }
 
@@ -83,10 +128,12 @@ export async function lockDatabase(
     const handle = await openSecondHandle(connection)
     await handle.exec("BEGIN IMMEDIATE")
 
-    let released = false
+    let hasReleased = false
     return async () => {
-        if (released) return
-        released = true
+        if (hasReleased) {
+            return
+        }
+        hasReleased = true
         await handle.exec("COMMIT")
         await handle.close()
     }
@@ -98,22 +145,35 @@ export async function lockDatabase(
  */
 export function captureLog(connection: DataSource) {
     const messages: string[] = []
-    const logger = connection.logger as any
+    const logger = connection.logger
     const original = logger.log
 
-    logger.log = (level: string, message: any, queryRunner?: any) => {
-        if (typeof message === "string") messages.push(`${level}: ${message}`)
+    logger.log = (
+        level: "log" | "info" | "warn",
+        message: unknown,
+        queryRunner?: QueryRunner,
+    ) => {
+        if (typeof message === "string") {
+            messages.push(`${level}: ${message}`)
+        }
         return original.call(logger, level, message, queryRunner)
     }
 
-    const count = (pattern: RegExp) =>
-        messages.filter((message) => pattern.test(message)).length
+    const countMessagesMatching = (pattern: RegExp) => {
+        return messages.filter((message) => {
+            return pattern.test(message)
+        }).length
+    }
 
     return {
-        all: () => messages.slice(),
-        retries: () => count(/SQLITE_BUSY, retrying/),
-        leaseWaits: () => count(/Waited \d+ms for the sqlite connection/),
-        leakRecoveries: () => count(/released with a transaction still open/),
+        getRetryCount: () => {
+            return countMessagesMatching(/SQLITE_BUSY, retrying/)
+        },
+        getAbandonedTransactionRollbackCount: () => {
+            return countMessagesMatching(
+                /released with a transaction still open/,
+            )
+        },
         restore: () => {
             logger.log = original
         },
@@ -126,27 +186,25 @@ export function captureLog(connection: DataSource) {
  */
 export function captureSql(connection: DataSource) {
     const statements: string[] = []
-    const logger = connection.logger as any
+    const logger = connection.logger
     const original = logger.logQuery
 
     logger.logQuery = (
         query: string,
-        parameters?: any[],
-        queryRunner?: any,
+        parameters?: unknown[],
+        queryRunner?: QueryRunner,
     ) => {
         statements.push(query)
         return original.call(logger, query, parameters, queryRunner)
     }
 
     return {
-        all: () => statements.slice(),
-        /** Just the transaction-control statements, which is what ownership turns on. */
-        transactionControl: () =>
-            statements.filter((sql) =>
-                /^\s*(BEGIN|COMMIT|ROLLBACK|SAVEPOINT|RELEASE)/i.test(sql),
-            ),
-        clear: () => {
-            statements.length = 0
+        getTransactionControlStatements: () => {
+            return statements.filter((sql) => {
+                return /^\s*(BEGIN|COMMIT|ROLLBACK|SAVEPOINT|RELEASE)/i.test(
+                    sql,
+                )
+            })
         },
         restore: () => {
             logger.logQuery = original

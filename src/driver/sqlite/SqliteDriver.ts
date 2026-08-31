@@ -1,7 +1,7 @@
 import fs from "fs/promises"
 import path from "path"
 import { DriverPackageNotInstalledError } from "../../error/DriverPackageNotInstalledError"
-import { SerializedSqliteQueryRunner } from "../sqlite-abstract/SqliteConnectionLease"
+import { SerializedSqliteQueryRunner } from "./SerializedSqliteQueryRunner"
 import { PlatformTools } from "../../platform/PlatformTools"
 import { DataSource } from "../../data-source/DataSource"
 import { SqliteConnectionOptions } from "./SqliteConnectionOptions"

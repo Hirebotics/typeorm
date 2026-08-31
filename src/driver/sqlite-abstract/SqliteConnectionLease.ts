@@ -1,170 +1,112 @@
 import { TypeORMError } from "../../error"
-import { IsolationLevel } from "../types/IsolationLevel"
-import { BetterSqlite3QueryRunner } from "../better-sqlite3/BetterSqlite3QueryRunner"
-import { SqliteQueryRunner } from "../sqlite/SqliteQueryRunner"
 import { AbstractSqliteDriver } from "./AbstractSqliteDriver"
-import { AbstractSqliteQueryRunner } from "./AbstractSqliteQueryRunner"
+import {
+    SqliteErrorLike,
+    SqliteLeasedQueryRunner,
+    SqliteLeaseOptions,
+    SqliteLeaseWaiter,
+} from "./sqlite.types"
 
 /**
- * Serialized query runners for the two sqlite drivers beacon runs.
+ * Serializes sqlite query runners against the driver's single connection.
  *
- * Upstream's sqlite drivers cache one query runner and hand the same object to every caller,
- * on the reasoning that sqlite has one connection so it can only have one query runner.
- * A query runner owns a *transaction*, though, not a connection.
- * Sharing one lets two units of work land in a single transaction:
- * the second one's writes become a savepoint inside the first one's transaction
- * and vanish with its ROLLBACK, while its caller is told it succeeded.
+ * Upstream's sqlite drivers cache one query runner and hand the same object to every
+ * caller, but a query runner owns a *transaction*, not a connection. Sharing one lets
+ * two units of work land in a single transaction: the second one's writes become a
+ * savepoint inside the first one's transaction and vanish with its ROLLBACK, while its
+ * caller is told it succeeded.
  *
  * The fix is two halves, and neither works alone:
  *   1. the drivers return a fresh runner per call, so each unit of work owns its transaction
- *   2. these subclasses lease the one connection, so those transactions cannot interleave
+ *   2. each runner leases the one connection, so those transactions cannot interleave
  *
- * Shipping half 1 without half 2 is worse than the bug:
- * a second concurrent BEGIN throws SQLITE_ERROR,
- * and the failing runner's ROLLBACK then kills the *other* runner's transaction.
+ * Shipping half 1 without half 2 is worse than the bug: a second concurrent BEGIN throws
+ * SQLITE_ERROR, and the failing runner's ROLLBACK then kills the other runner's transaction.
  */
 
-/**
- * Options read off the driver.
- * Each driver's connection options interface declares its own.
- */
-interface SqliteLeaseOptions {
-    busyErrorRetryInterval?: number
-    busyErrorRetryLimit?: number
-    connectionLeaseTimeout?: number
-    statementCacheSize?: number
-    /** better-sqlite3 */
-    timeout?: number
-    /** node-sqlite3 */
-    busyTimeout?: number
-}
+const DEFAULT_BUSY_RETRY_TIMEOUT = 5000
 
-const DEFAULT_RETRY_LIMIT = 10
+const DEFAULT_LEASE_TIMEOUT = 60_000
 
-/**
- * Both drivers apply a busy timeout we never see in `options`.
- * BetterSqlite3Driver destructures `timeout = 5000` inside createDatabaseConnection(),
- * and node-sqlite3 calls sqlite3_busy_timeout(handle, 1000) in C at open, before any option.
- * Reading the configured value alone would report 0 on an unconfigured install.
- * Production today is unconfigured,
- * which is the reason a nominal 200ms retry budget really costs 16 seconds.
- */
-const IMPLICIT_BUSY_TIMEOUT = {
-    betterSqlite3: 5000,
-    sqlite: 1000,
+async function sleep(ms: number): Promise<void> {
+    await new Promise<void>((resolve) => {
+        setTimeout(resolve, ms)
+    })
 }
 
 /**
- * Lease acquire never waits less than this, however small the retry budget works out to be.
+ * Checks various shapes of error for SQLITE_BUSY.
  */
-const MIN_LEASE_TIMEOUT = 30000
-
-/**
- * The lease timeout has to cover a queue, not just one holder ahead of us.
- * This is the number of runners we size for; beyond it, contention surfaces as a lease timeout.
- */
-const EXPECTED_CONTENDING_RUNNERS = 3
-
-/**
- * Any wait on the connection longer than this is logged, so field stalls are visible.
- */
-const SLOW_ACQUIRE_WARN_MS = 1000
-
-const delay = (ms: number) => new Promise<void>((ok) => setTimeout(ok, ms))
-
-/**
- * Retry only covers SQLITE_BUSY, so match on the code rather than the message where we can.
- * QueryFailedError copies the driver error's own enumerable properties,
- * so `code` survives the wrap.
- */
-function isBusyError(err: any): boolean {
+export function isBusyError(err: SqliteErrorLike): boolean {
     const code = err?.code ?? err?.driverError?.code
-    if (typeof code === "string" && code.startsWith("SQLITE_BUSY")) return true
-    // node-sqlite3 never calls sqlite3_extended_result_codes(), and older wrappers set no code.
-    return String(err?.message ?? err).includes("SQLITE_BUSY")
-}
-
-// -------------------------------------------------------------------------
-// The lease
-// -------------------------------------------------------------------------
-
-type Waiter = {
-    grant: () => void
-    fail: (err: Error) => void
-    timer: any
+    if (typeof code === "string" && code.startsWith("SQLITE_BUSY")) {
+        return true
+    }
+    if (String(err?.message ?? err).includes("SQLITE_BUSY")) {
+        return true
+    }
+    return false
 }
 
 /**
- * One slot, handed out first-come-first-served.
- *
- * release() passes the slot straight to the next waiter instead of clearing `held`,
- * so a woken waiter cannot lose the slot to a runner that arrives while it is still resuming.
+ * Exclusive use of the single sqlite connection, granted first-come-first-served.
  */
-class ConnectionLease {
-    private held = false
-    private waiters: Waiter[] = []
+export class SqliteConnectionLease {
+    private isHeld = false
+    private waiters: SqliteLeaseWaiter[] = []
 
-    /** SQL the current holder was running when it took the slot. Diagnostics only. */
-    holderSql: string | undefined
+    /** SQL the current holder is running. Diagnostics only. */
+    currentlyRunningSql: string | undefined
 
     get queueLength(): number {
         return this.waiters.length
     }
 
-    async acquire(sql: string, timeoutMs: number): Promise<number> {
-        if (!this.held) {
-            this.held = true
-            this.holderSql = sql
-            return 0
+    async acquire(sql: string, timeoutMs: number): Promise<void> {
+        if (!this.isHeld) {
+            this.isHeld = true
+            this.currentlyRunningSql = sql
+            return
         }
 
-        const blockedBy = this.holderSql
-        const waitStart = Date.now()
+        const blockingSql = this.currentlyRunningSql
 
         await new Promise<void>((resolve, reject) => {
-            const waiter: Waiter = {
+            const waiter: SqliteLeaseWaiter = {
                 grant: () => {
                     clearTimeout(waiter.timer)
                     resolve()
                 },
-                fail: (err) => {
-                    clearTimeout(waiter.timer)
-                    reject(err)
-                },
-                timer: undefined,
             }
 
             waiter.timer = setTimeout(() => {
                 const index = this.waiters.indexOf(waiter)
-                if (index >= 0) this.waiters.splice(index, 1)
+                if (index >= 0) {
+                    this.waiters.splice(index, 1)
+                }
                 reject(
                     new TypeORMError(
-                        `Timed out after ${timeoutMs}ms waiting for the sqlite connection. ` +
-                            `Waiting on: ${sql}. Holder was running: ${
-                                blockedBy ?? "unknown"
-                            }.`,
+                        `Timed out after ${timeoutMs}ms waiting for the sqlite connection. Waiting to run: ${sql}. Blocked by: ${blockingSql}.`,
                     ),
                 )
             }, timeoutMs)
 
             // Never hold the process open just to time out a wait.
-            if (typeof waiter.timer?.unref === "function") waiter.timer.unref()
+            waiter.timer.unref()
 
             this.waiters.push(waiter)
         })
 
-        this.holderSql = sql
-        return Date.now() - waitStart
+        this.currentlyRunningSql = sql
     }
 
     release(): void {
         const next = this.waiters.shift()
         if (next) {
-            // Slot stays held; the waiter owns it the moment it resumes.
             next.grant()
         } else {
-            this.held = false
-            this.holderSql = undefined
+            this.isHeld = false
+            this.currentlyRunningSql = undefined
         }
     }
 }
@@ -173,469 +115,275 @@ class ConnectionLease {
  * Keyed on the driver rather than the connection handle.
  * The driver exists before the handle does, and both live exactly as long as the DataSource.
  */
-const leases = new WeakMap<AbstractSqliteDriver, ConnectionLease>()
+const leases = new WeakMap<AbstractSqliteDriver, SqliteConnectionLease>()
 
-function leaseFor(driver: AbstractSqliteDriver): ConnectionLease {
+function getLease(driver: AbstractSqliteDriver): SqliteConnectionLease {
     let lease = leases.get(driver)
     if (!lease) {
-        lease = new ConnectionLease()
+        lease = new SqliteConnectionLease()
         leases.set(driver, lease)
     }
     return lease
 }
 
-// -------------------------------------------------------------------------
-// Slot held by one query runner
-// -------------------------------------------------------------------------
-
-/**
- * What the slot needs from the runner holding it.
- *
- * Extends the runner class so that `depth` can widen the protected transactionDepth.
- * Only subclasses of AbstractSqliteQueryRunner can satisfy an interface shaped like this,
- * which is exactly the constraint we want.
- */
-export interface SlotHost extends AbstractSqliteQueryRunner {
-    /** transactionDepth, widened. The retry rule turns on it and release() has to reset it. */
-    depth: number
-}
-
 /**
  * BEGIN IMMEDIATE takes the write lock up front.
  *
- * PowerSync writes over its own connection, so we cannot serialize it.
- * A deferred BEGIN pins a read snapshot that later fails SQLITE_BUSY_SNAPSHOT on upgrade,
- * and no retry can clear that state.
- * Failing at BEGIN instead turns "unit of work half done" into "unit of work not started".
+ * Another connection can write the same database (for example a sync engine running
+ * in a worker thread), and the lease cannot serialize a writer it does not manage.
+ * A deferred BEGIN pins a read snapshot that later fails with SQLITE_BUSY_SNAPSHOT
+ * on upgrade, which no retry can clear. Failing at BEGIN instead turns "unit of work
+ * half done" into "unit of work not started", as retryable SQLITE_BUSY.
  */
 export function toImmediateBegin(query: string): string {
-    return query === "BEGIN TRANSACTION" ? "BEGIN IMMEDIATE" : query
+    if (query === "BEGIN TRANSACTION") {
+        return "BEGIN IMMEDIATE"
+    }
+    return query
 }
 
 /**
- * One runner's claim on the single connection, plus the SQLITE_BUSY retry it runs under.
+ * One runner's lease on the single connection, plus the SQLITE_BUSY retry it runs under.
  *
- * Composed rather than mixed in.
- * A mixin cannot work here: typeorm emits declaration files,
+ * Composed rather than mixed into the runner classes: typeorm emits declaration files,
  * and TypeScript will not emit a .d.ts for an anonymous class with protected members (TS4094).
  */
-export class ConnectionSlot {
-    /** Statements running right now on this runner. TypeORM issues them concurrently. */
-    private inFlight = 0
-
-    /** True once this runner owns the connection slot. */
-    private holds = false
+export class SqliteLeaseHolder {
+    private readonly lease: SqliteConnectionLease
+    private inFlightStatementCount = 0
+    private hasLease = false
 
     /**
-     * In-flight acquire, shared by every statement on this runner.
-     *
-     * Without it, two statements issued together would each queue for the same slot,
-     * and the second would wait out the timeout for a slot its own runner already holds.
+     * True while a transaction opened by a raw query("BEGIN ...") is open in sqlite.
+     * A raw BEGIN sets no runner flag, and the lease must stay held until that
+     * transaction ends too.
      */
-    private acquisition: Promise<void> | undefined
+    private isRawTransactionOpen = false
 
-    constructor(private readonly host: SlotHost) {}
+    /**
+     * Statements can run concurrently on one runner. They share one in-flight
+     * acquire, so a statement never queues behind the lease its own runner
+     * already holds.
+     */
+    private acquirePromise: Promise<void> | undefined
+
+    constructor(private readonly runner: SqliteLeasedQueryRunner) {
+        this.lease = getLease(runner.driver)
+    }
 
     private get options(): SqliteLeaseOptions {
-        return this.host.driver.options as SqliteLeaseOptions
+        return this.runner.driver.options as SqliteLeaseOptions
     }
 
-    /**
-     * Busy timeout actually in force, including the default the driver applies for us.
-     * On better-sqlite3 this is time spent blocked inside C, not awaited.
-     */
-    effectiveBusyTimeout(): number {
-        const options = this.options
-        if (options.timeout !== undefined) return options.timeout
-        if (options.busyTimeout !== undefined) return options.busyTimeout
-        return this.host.driver.options.type === "better-sqlite3"
-            ? IMPLICIT_BUSY_TIMEOUT.betterSqlite3
-            : IMPLICIT_BUSY_TIMEOUT.sqlite
+    private getLeaseTimeoutMs(): number {
+        return this.options.connectionLeaseTimeout ?? DEFAULT_LEASE_TIMEOUT
     }
 
-    private retryPolicy(): { interval: number; limit: number } {
-        const options = this.options
-        return {
-            interval: options.busyErrorRetryInterval ?? 0,
-            limit: options.busyErrorRetryLimit ?? DEFAULT_RETRY_LIMIT,
-        }
-    }
-
-    /**
-     * The slot is held across a whole transaction, retries included,
-     * so this wait has to dominate the retry budget.
-     * Otherwise a waiter gives up on a holder that is still making progress.
-     * Sized for EXPECTED_CONTENDING_RUNNERS, not for a single holder.
-     */
-    leaseTimeout(): number {
-        const configured = this.options.connectionLeaseTimeout
-        if (configured !== undefined) return configured
-
-        const { interval, limit } = this.retryPolicy()
-        const worstCaseHold = limit * (this.effectiveBusyTimeout() + interval)
-        return Math.max(
-            MIN_LEASE_TIMEOUT,
-            worstCaseHold * EXPECTED_CONTENDING_RUNNERS,
-        )
-    }
-
-    /**
-     * Takes the connection slot for this runner, once.
-     * Re-entrant by design: nested and concurrent statements share the one acquisition.
-     */
     private acquire(sql: string): Promise<void> {
-        if (!this.acquisition) {
-            this.acquisition = leaseFor(this.host.driver)
-                .acquire(sql, this.leaseTimeout())
-                .then((waitedMs) => {
-                    this.holds = true
-                    if (waitedMs >= SLOW_ACQUIRE_WARN_MS) {
-                        this.host.connection.logger.log(
-                            "warn",
-                            `Waited ${waitedMs}ms for the sqlite connection before running: ${sql}`,
-                            this.host,
-                        )
-                    }
-                })
-                .catch((err) => {
-                    // Let the next statement try again rather than caching the failure.
-                    this.acquisition = undefined
-                    throw err
-                })
+        if (!this.acquirePromise) {
+            this.acquirePromise = this.acquireLease(sql)
         }
-        return this.acquisition
+        return this.acquirePromise
+    }
+
+    private async acquireLease(sql: string): Promise<void> {
+        try {
+            await this.lease.acquire(sql, this.getLeaseTimeoutMs())
+            this.hasLease = true
+        } catch (err) {
+            // Let the next statement try again rather than caching the failure.
+            this.acquirePromise = undefined
+            throw err
+        }
     }
 
     /**
-     * Frees the slot once nothing on this runner still needs it.
+     * Frees the lease once nothing on this runner still needs it: no statement in
+     * flight, no managed transaction, no raw transaction. A no-op when the lease is
+     * not held, so it is safe to call on every path.
      *
-     * Do not simplify the checks below to `depth === 0`.
-     * startTransaction() sets isTransactionActive *before* issuing BEGIN
-     * and increments transactionDepth *after*,
-     * so a depth-only test frees the slot in the middle of opening a transaction.
+     * Do not simplify the checks to `transactionDepth === 0`: while a transaction
+     * opens, isTransactionActive becomes true before transactionDepth increments,
+     * so both must be checked.
      */
     releaseIfIdle(): void {
-        if (!this.holds) return
-        if (
-            this.inFlight > 0 ||
-            this.host.isTransactionActive ||
-            this.host.depth > 0
-        )
+        if (!this.hasLease) {
             return
+        }
+        if (
+            this.inFlightStatementCount > 0 ||
+            this.runner.isTransactionActive ||
+            this.runner.transactionDepth > 0 ||
+            this.isRawTransactionOpen
+        ) {
+            return
+        }
         this.forceRelease()
     }
 
+    /**
+     * Recovers from a BEGIN that failed before taking effect. At depth 0 nothing is
+     * open in sqlite, but isTransactionActive may already be true. Reset it so the
+     * lease can be freed instead of staying held until the runner is released.
+     */
+    releaseAfterFailedBegin(): void {
+        if (this.runner.transactionDepth === 0) {
+            this.runner.isTransactionActive = false
+        }
+        this.releaseIfIdle()
+    }
+
     forceRelease(): void {
-        if (!this.holds) return
-        this.holds = false
-        this.acquisition = undefined
-        leaseFor(this.host.driver).release()
+        if (!this.hasLease) {
+            return
+        }
+        this.hasLease = false
+        this.acquirePromise = undefined
+        this.lease.release()
     }
 
     /**
-     * Retry is safe only where a failed statement leaves nothing behind.
+     * Retry is safe only where a failed statement leaves nothing behind. Inside a
+     * transaction it is not: sqlite has already rolled the failed statement back, so
+     * retrying it alone would commit a partial unit of work. COMMIT and ROLLBACK are
+     * the exceptions -- both legitimately return SQLITE_BUSY while a reader is present,
+     * and both must land, or the transaction left open fails every later BEGIN on the
+     * connection with non-retryable SQLITE_ERROR.
      *
-     * Inside a transaction it is not:
-     * sqlite has already rolled the failed statement back and the unit of work is incomplete,
-     * so retrying the one statement would commit a partial result.
-     * COMMIT and ROLLBACK are the exceptions.
-     * Both legitimately return SQLITE_BUSY when a reader is present, and both must land.
-     * A transaction left open makes the next runner's BEGIN fail with SQLITE_ERROR,
-     * which no retry covers.
-     *
-     * The gate is transaction state rather than the error code,
-     * because node-sqlite3 never calls sqlite3_extended_result_codes():
-     * SQLITE_BUSY_SNAPSHOT is invisible on that driver,
-     * so a code-prefix rule could not be shared by both drivers.
+     * The gate is transaction state rather than the error code because node-sqlite3
+     * never calls sqlite3_extended_result_codes(): SQLITE_BUSY_SNAPSHOT is invisible
+     * there, so a code-prefix rule cannot be shared by both drivers.
      */
     private isRetryable(sql: string): boolean {
-        return this.host.depth === 0 || /^\s*(COMMIT|END|ROLLBACK)\b/i.test(sql)
+        if (this.runner.transactionDepth === 0) {
+            return true
+        }
+        return /^\s*(COMMIT|END|ROLLBACK)\b/i.test(sql)
     }
 
     /**
-     * Runs one statement holding the slot, retrying it while sqlite reports the database busy.
+     * Tracks transactions opened and closed by raw transaction-control statements.
+     * A BEGIN or COMMIT that arrives while the runner flags already track a
+     * transaction is managed transaction control, not raw, and is ignored here.
      */
-    async run<T>(sql: string, exec: () => Promise<T>): Promise<T> {
-        this.inFlight += 1
+    private noteRawTransactionControl(sql: string): void {
+        if (
+            this.runner.isTransactionActive ||
+            this.runner.transactionDepth > 0
+        ) {
+            return
+        }
+        if (/^\s*BEGIN\b/i.test(sql)) {
+            this.isRawTransactionOpen = true
+            return
+        }
+        if (/^\s*(COMMIT|END|ROLLBACK)\b/i.test(sql)) {
+            this.isRawTransactionOpen = false
+        }
+    }
+
+    /**
+     * Runs one statement under the lease, retrying while sqlite reports the database busy.
+     */
+    async run<T>(sql: string, executeStatement: () => Promise<T>): Promise<T> {
+        this.inFlightStatementCount += 1
         try {
             await this.acquire(sql)
+            this.lease.currentlyRunningSql = sql
 
-            const { interval, limit } = this.retryPolicy()
-            if (interval <= 0) return await exec()
+            const retryIntervalMs = this.options.busyErrorRetryInterval ?? 0
+            const retryBudgetMs =
+                this.options.busyErrorRetryTimeout ?? DEFAULT_BUSY_RETRY_TIMEOUT
 
-            for (let attempt = 0; ; attempt++) {
+            let deadline: number | undefined
+            for (;;) {
                 try {
-                    return await exec()
+                    const result = await executeStatement()
+                    this.noteRawTransactionControl(sql)
+                    return result
                 } catch (err) {
                     if (
-                        attempt >= limit ||
+                        retryIntervalMs <= 0 ||
                         !isBusyError(err) ||
                         !this.isRetryable(sql)
-                    )
+                    ) {
                         throw err
+                    }
 
-                    this.host.connection.logger.log(
+                    const now = Date.now()
+                    if (deadline === undefined) {
+                        deadline = now + retryBudgetMs
+                    }
+                    if (now >= deadline) {
+                        throw err
+                    }
+
+                    this.runner.connection.logger.log(
                         "warn",
-                        `SQLITE_BUSY, retrying in ${interval}ms (attempt ${
-                            attempt + 1
-                        } of ${limit}): ${sql}`,
-                        this.host,
+                        `SQLITE_BUSY, retrying in ${retryIntervalMs}ms (${
+                            deadline - now
+                        }ms of retry budget left): ${sql}`,
+                        this.runner,
                     )
-                    await delay(interval)
+                    await sleep(retryIntervalMs)
                 }
             }
         } finally {
-            this.inFlight -= 1
+            this.inFlightStatementCount -= 1
             this.releaseIfIdle()
         }
     }
 
     /**
-     * Frees the slot unconditionally, rolling back an abandoned transaction first.
+     * Releases the runner, rolling back an abandoned transaction first.
      *
-     * A divergence from every other driver, which only flips isReleased here.
-     * Sqlite has one connection:
-     * a transaction left open would fail the next runner's BEGIN with SQLITE_ERROR
-     * rather than SQLITE_BUSY, so retry could not recover.
+     * A divergence from every other driver, which only flips isReleased here. Sqlite
+     * has one connection: a transaction left open would fail every later BEGIN on it
+     * with SQLITE_ERROR rather than SQLITE_BUSY, so retry could not recover.
      *
-     * Never throws.
-     * TypeORM calls release() from finally blocks throughout,
-     * so throwing would both leak the slot and mask the error that got us here.
+     * The abandoned-transaction gate checks transactionDepth and the raw flag as
+     * well as isTransactionActive: a nested BEGIN that fails can leave
+     * isTransactionActive false while the outer transaction is still open in sqlite,
+     * and a raw BEGIN sets no runner flag at all.
+     *
+     * Never throws: release runs while an original error may be propagating, and a
+     * throw here would mask that error and leak the lease.
      */
-    async releaseRunner(
-        rollback: () => Promise<any>,
-        superRelease: () => Promise<void>,
-    ): Promise<void> {
+    async releaseRunner(superRelease: () => Promise<void>): Promise<void> {
+        if (this.runner.isReleased) {
+            return
+        }
         try {
-            if (this.host.isTransactionActive) {
-                // Only worth attempting if we hold the slot.
-                // Without the slot the BEGIN never took,
-                // so there is no transaction on the connection to roll back.
-                if (this.holds) {
+            if (
+                this.runner.isTransactionActive ||
+                this.runner.transactionDepth > 0 ||
+                this.isRawTransactionOpen
+            ) {
+                // Without the lease the BEGIN never took effect, so there is nothing
+                // open in sqlite to roll back.
+                if (this.hasLease) {
                     try {
-                        await rollback()
+                        await this.runner.query("ROLLBACK")
+                        this.runner.connection.logger.log(
+                            "warn",
+                            `Query runner released with a transaction still open. Rolled it back.`,
+                            this.runner,
+                        )
                     } catch {
                         // Ignored: teardown must not throw.
                     }
                 }
-                this.host.isTransactionActive = false
-                this.host.depth = 0
-                this.host.connection.logger.log(
-                    "warn",
-                    `Query runner released with a transaction still open. Rolled it back.`,
-                    this.host,
-                )
+                this.runner.isTransactionActive = false
+                this.runner.transactionDepth = 0
+                this.isRawTransactionOpen = false
             }
+            this.runner.isReleased = true
             await superRelease()
         } finally {
-            this.forceRelease()
+            // releaseIfIdle rather than forceRelease: releasing while a statement is
+            // still in flight must leave the lease to that statement, or the next
+            // runner starts while the old statement is still executing.
+            this.releaseIfIdle()
         }
-    }
-}
-
-// -------------------------------------------------------------------------
-// Concrete runners
-// -------------------------------------------------------------------------
-
-export class SerializedSqliteQueryRunner
-    extends SqliteQueryRunner
-    implements SlotHost
-{
-    private slot = new ConnectionSlot(this)
-
-    /** Widened from protected so ConnectionSlot can read and reset it. */
-    get depth(): number {
-        return this.transactionDepth
-    }
-    set depth(value: number) {
-        this.transactionDepth = value
-    }
-
-    async query(
-        query: string,
-        parameters?: any[],
-        useStructuredResult = false,
-    ): Promise<any> {
-        const sql = toImmediateBegin(query)
-        return this.slot.run(sql, () =>
-            super.query(sql, parameters, useStructuredResult),
-        )
-    }
-
-    async startTransaction(isolationLevel?: IsolationLevel): Promise<void> {
-        try {
-            await super.startTransaction(isolationLevel)
-        } catch (err) {
-            // A BeforeTransactionStart subscriber that queries and then throws
-            // leaves the slot held with no commit or rollback coming.
-            // super's catch clears isTransactionActive before rethrowing,
-            // so by here the idle test is accurate.
-            this.slot.releaseIfIdle()
-            throw err
-        }
-    }
-
-    async commitTransaction(): Promise<void> {
-        try {
-            await super.commitTransaction()
-        } finally {
-            // Has to be here, not in query().
-            // COMMIT runs while isTransactionActive is still true and depth is still 1,
-            // so run() correctly declines to free the slot, and nothing else calls back.
-            this.slot.releaseIfIdle()
-        }
-    }
-
-    async rollbackTransaction(): Promise<void> {
-        try {
-            await super.rollbackTransaction()
-        } finally {
-            this.slot.releaseIfIdle()
-        }
-    }
-
-    async release(): Promise<void> {
-        return this.slot.releaseRunner(
-            () => this.query("ROLLBACK"),
-            () => super.release(),
-        )
-    }
-}
-
-/**
- * Cache of prepared statements, shared by every runner on one connection handle.
- *
- * Upstream caches statements per runner.
- * That was free while the driver reused a single runner forever.
- * With a runner per unit of work the cache is born empty every time,
- * so identical SQL re-prepares on every query, and every prepare reads the schema.
- *
- * Hung off the connection handle,
- * so a destroy()/initialize() cycle cannot hand out statements compiled against a closed handle.
- * Safe to share: .all() and .run() are synchronous, the driver never opens an iterator,
- * and the lease means only one runner is ever mid-statement.
- */
-const memoizedConnections = new WeakSet<object>()
-
-function memoizePrepare(databaseConnection: any, cacheSize: number): void {
-    if (!databaseConnection || memoizedConnections.has(databaseConnection))
-        return
-    memoizedConnections.add(databaseConnection)
-
-    // Upstream documents statementCacheSize 0 as "do not cache".
-    // Honour that here too, or this memo would quietly reinstate caching the config turned off.
-    if (cacheSize <= 0) return
-
-    const prepare = databaseConnection.prepare.bind(databaseConnection)
-    const cache = new Map<string, any>()
-
-    databaseConnection.prepare = (sql: string) => {
-        let stmt = cache.get(sql)
-        if (!stmt) {
-            stmt = prepare(sql)
-            cache.set(sql, stmt)
-            // Map keeps insertion order, so deleting the first key evicts the oldest statement.
-            while (cache.size > cacheSize) {
-                cache.delete(cache.keys().next().value!)
-            }
-        }
-        return stmt
-    }
-}
-
-export class SerializedBetterSqlite3QueryRunner
-    extends BetterSqlite3QueryRunner
-    implements SlotHost
-{
-    private slot = new ConnectionSlot(this)
-
-    /** Widened from protected so ConnectionSlot can read and reset it. */
-    get depth(): number {
-        return this.transactionDepth
-    }
-    set depth(value: number) {
-        this.transactionDepth = value
-    }
-
-    async query(
-        query: string,
-        parameters?: any[],
-        useStructuredResult = false,
-    ): Promise<any> {
-        memoizePrepare(
-            this.driver.databaseConnection,
-            this.driver.options.statementCacheSize ?? 100,
-        )
-        const sql = toImmediateBegin(query)
-        return this.slot.run(sql, () =>
-            super.query(sql, parameters, useStructuredResult),
-        )
-    }
-
-    async startTransaction(isolationLevel?: IsolationLevel): Promise<void> {
-        try {
-            await super.startTransaction(isolationLevel)
-        } catch (err) {
-            // See SerializedSqliteQueryRunner.startTransaction.
-            this.slot.releaseIfIdle()
-            throw err
-        }
-    }
-
-    async commitTransaction(): Promise<void> {
-        try {
-            await super.commitTransaction()
-        } finally {
-            this.slot.releaseIfIdle()
-        }
-    }
-
-    async rollbackTransaction(): Promise<void> {
-        try {
-            await super.rollbackTransaction()
-        } finally {
-            this.slot.releaseIfIdle()
-        }
-    }
-
-    async release(): Promise<void> {
-        return this.slot.releaseRunner(
-            () => this.query("ROLLBACK"),
-            () => super.release(),
-        )
-    }
-
-    /**
-     * Routed through query() on purpose, so the lease and the retry cover it.
-     * Upstream calls databaseConnection.pragma() directly, which skips both.
-     */
-    async beforeMigration(): Promise<void> {
-        await this.query(`PRAGMA foreign_keys = OFF`)
-    }
-
-    async afterMigration(): Promise<void> {
-        await this.query(`PRAGMA foreign_keys = ON`)
-    }
-
-    /**
-     * Same reason, and the worst offender:
-     * loadTables() fires three of these per table at once.
-     * better-sqlite3's pragma() is synchronous,
-     * so each unleased call blocks the event loop for the busy timeout.
-     *
-     * Reimplemented rather than delegated to super:
-     * the abstract version drops the attached database prefix,
-     * so delegating would silently lose attached-database support.
-     */
-    protected async loadPragmaRecords(
-        tablePath: string,
-        pragma: string,
-    ): Promise<any> {
-        const [database, tableName] = this.splitTablePath(tablePath)
-        return this.query(
-            `PRAGMA ${
-                database ? `"${database}".` : ""
-            }${pragma}("${tableName}")`,
-        )
     }
 }

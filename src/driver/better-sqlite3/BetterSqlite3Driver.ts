@@ -7,7 +7,7 @@ import { ColumnType } from "../types/ColumnTypes"
 import { QueryRunner } from "../../query-runner/QueryRunner"
 import { AbstractSqliteDriver } from "../sqlite-abstract/AbstractSqliteDriver"
 import { BetterSqlite3ConnectionOptions } from "./BetterSqlite3ConnectionOptions"
-import { SerializedBetterSqlite3QueryRunner } from "../sqlite-abstract/SqliteConnectionLease"
+import { SerializedBetterSqlite3QueryRunner } from "./SerializedBetterSqlite3QueryRunner"
 import { ReplicationMode } from "../types/ReplicationMode"
 import { filepathToName, isAbsolute } from "../../util/PathUtils"
 

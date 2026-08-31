@@ -72,6 +72,7 @@ pnpm run compile
 
 echo "[beacon] running Beacon tests ..."
 node_modules/.bin/mocha --config "$BEACON_DIR/mocharc.beacon.json" \
+    build/compiled/test/functional/driver/abstract-sqlite/sqlite-connection-lease-unit.test.js \
     build/compiled/test/functional/driver/abstract-sqlite/abstract-sqlite-query-runner-ownership.test.js \
     build/compiled/test/functional/driver/abstract-sqlite/abstract-sqlite-begin-immediate.test.js \
     build/compiled/test/functional/driver/abstract-sqlite/abstract-sqlite-busy-error-retry.test.js \

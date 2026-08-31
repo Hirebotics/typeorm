@@ -1,9 +1,12 @@
 import { BaseDataSourceOptions } from "../../data-source/BaseDataSourceOptions"
+import { SqliteLeaseOptions } from "../sqlite-abstract/sqlite.types"
 
 /**
  * Sqlite-specific connection options.
  */
-export interface BetterSqlite3ConnectionOptions extends BaseDataSourceOptions {
+export interface BetterSqlite3ConnectionOptions
+    extends BaseDataSourceOptions,
+        SqliteLeaseOptions {
     /**
      * Database type.
      */
@@ -72,28 +75,8 @@ export interface BetterSqlite3ConnectionOptions extends BaseDataSourceOptions {
 
     /**
      * Enables WAL mode. By default its disabled.
+     *
      * @see https://www.sqlite.org/wal.html
      */
     readonly enableWAL?: boolean
-
-    /**
-     * Milliseconds to wait before retrying a statement that failed with SQLITE_BUSY.
-     * Sqlite allows one writer at a time, so concurrent writes surface as SQLITE_BUSY.
-     *
-     * Default: 0, meaning no retries.
-     */
-    readonly busyErrorRetryInterval?: number
-
-    /**
-     * How many times one statement may be retried after SQLITE_BUSY. Must be above 0.
-     * Only has an effect when busyErrorRetryInterval is set.
-     *
-     * Default: 10.
-     */
-    readonly busyErrorRetryLimit?: number
-
-    /**
-     * Milliseconds a query runner waits for exclusive use of the connection before failing.
-     */
-    readonly connectionLeaseTimeout?: number
 }
