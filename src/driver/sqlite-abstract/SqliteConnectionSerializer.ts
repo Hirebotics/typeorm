@@ -1,4 +1,3 @@
-import { performance } from "perf_hooks"
 import { AbstractSqliteDriver } from "./AbstractSqliteDriver"
 import { SqliteConnectionLease } from "./SqliteConnectionLease"
 import { SqliteLeaseOptions } from "./sqlite.types"
@@ -273,7 +272,6 @@ export class SqliteConnectionSerializer {
         const retryIntervalMs = this.getBusyErrorRetryInterval()
         const retryBudgetMs = this.getBusyErrorRetryTimeout()
 
-        // Monotonic, so a system clock step cannot stretch or cut the budget short.
         // Set on the first busy error, not on the first attempt.
         let deadline: number | undefined
         while (true) {
@@ -288,7 +286,7 @@ export class SqliteConnectionSerializer {
                     throw err
                 }
 
-                const now = performance.now()
+                const now = Date.now()
                 if (deadline === undefined) {
                     deadline = now + retryBudgetMs
                 }
