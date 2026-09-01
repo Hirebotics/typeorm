@@ -1,26 +1,21 @@
 import { IsolationLevel } from "../types/IsolationLevel"
-import { SqliteLeaseHolder } from "../sqlite-abstract/SqliteConnectionLease"
+import { SqliteConnectionSerializer } from "../sqlite-abstract/SqliteConnectionSerializer"
 import { BetterSqlite3QueryRunner } from "./BetterSqlite3QueryRunner"
 
 /**
  * BetterSqlite3QueryRunner serialized against the driver's single connection.
- * See SqliteConnectionLease.ts for the rationale.
+ * See SqliteConnectionSerializer.ts for the rationale.
  * Hirebotics file, not part of upstream TypeORM.
  */
 export class SerializedBetterSqlite3QueryRunner extends BetterSqlite3QueryRunner {
-    /**
-     * Expose the inherited protected property so the connection lease can see it.
-     */
-    declare transactionDepth: number
-
-    private leaseHolder = new SqliteLeaseHolder(this)
+    private readonly serializer = new SqliteConnectionSerializer(this.driver)
 
     async query(
         query: string,
         parameters?: any[],
         useStructuredResult = false,
     ): Promise<any> {
-        return this.leaseHolder.run(query, (sql) => {
+        return this.serializer.run(query, (sql) => {
             return super.query(sql, parameters, useStructuredResult)
         })
     }
@@ -29,37 +24,32 @@ export class SerializedBetterSqlite3QueryRunner extends BetterSqlite3QueryRunner
         try {
             await super.startTransaction(isolationLevel)
         } catch (err) {
-            this.leaseHolder.releaseAfterFailedBegin()
+            // Upstream leaves isTransactionActive set when the BEGIN fails,
+            // and clears it when a nested begin fails while the outer transaction is open.
+            // Both leave the flag disagreeing with sqlite, which is the authority.
+            this.isTransactionActive = this.serializer.isTransactionOpen
             throw err
         }
     }
 
-    async commitTransaction(): Promise<void> {
-        try {
-            await super.commitTransaction()
-        } finally {
-            this.leaseHolder.releaseIfIdle()
-        }
-    }
-
-    async rollbackTransaction(): Promise<void> {
-        try {
-            await super.rollbackTransaction()
-        } finally {
-            this.leaseHolder.releaseIfIdle()
-        }
-    }
-
     async release(): Promise<void> {
-        return this.leaseHolder.releaseRunner(() => {
-            return super.release()
+        if (this.isReleased) {
+            return
+        }
+        await this.serializer.rollbackOnRelease((sql) => {
+            return super.query(sql)
         })
+        // Nothing is open once released, whether or not a rollback was needed.
+        this.isTransactionActive = false
+        this.transactionDepth = 0
+        this.isReleased = true
+        await super.release()
     }
 
     /**
-     * Routed through query() so the lease and the retry cover the pragma.
-     * Upstream calls databaseConnection.pragma() directly, which skips both
-     * and blocks the event loop inside better-sqlite3's synchronous busy timeout.
+     * Routed through query() so serialization and the busy retry cover the pragma.
+     * Upstream issues the migration and schema-loading pragmas through its driver's
+     * pragma() rather than through query(), which would bypass our special handling.
      */
     async beforeMigration(): Promise<void> {
         await this.query(`PRAGMA foreign_keys = OFF`)
@@ -70,8 +60,9 @@ export class SerializedBetterSqlite3QueryRunner extends BetterSqlite3QueryRunner
     }
 
     /**
-     * Routed through query() so the lease and the retry cover the pragma.
-     * Upstream drops the attached-database prefix,
+     * Routed through query() so serialization and the busy retry cover the pragma.
+     * Reimplemented rather than delegated to super:
+     * the abstract version drops the attached-database prefix,
      * so delegating would silently lose attached-database support.
      */
     protected async loadPragmaRecords(

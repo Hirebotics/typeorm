@@ -129,6 +129,39 @@ export async function openSecondHandle(
 }
 
 /**
+ * Runs a statement straight on the driver's own handle, bypassing the serializer.
+ * Nothing in the fork should do this.
+ * A test uses it to put sqlite and the serializer into states that disagree.
+ */
+export async function executeOutOfBand(
+    connection: DataSource,
+    sql: string,
+): Promise<void> {
+    const handle = (
+        connection.driver as unknown as { databaseConnection: unknown }
+    ).databaseConnection
+
+    if (connection.options.type === "better-sqlite3") {
+        const database = handle as { exec(sql: string): void }
+        database.exec(sql)
+        return
+    }
+
+    const runStatement = handle as {
+        run(sql: string, callback: (err: Error | null) => void): void
+    }
+    await new Promise<void>((ok, fail) => {
+        runStatement.run(sql, (err) => {
+            if (err) {
+                fail(err)
+            } else {
+                ok()
+            }
+        })
+    })
+}
+
+/**
  * Holds a write lock on the connection's database file until the returned function is awaited.
  */
 export async function lockDatabase(

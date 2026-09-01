@@ -1,12 +1,10 @@
-import { AbstractSqliteQueryRunner } from "./AbstractSqliteQueryRunner"
-
 /**
- * Shared shapes for the sqlite connection lease.
+ * Shared sqlite shapes.
  * Hirebotics file, not part of upstream TypeORM.
  */
 
 /**
- * Options for the lease and the busy retry.
+ * Options for serializing query runners against the single sqlite connection.
  */
 export interface SqliteLeaseOptions {
     /**
@@ -32,38 +30,4 @@ export interface SqliteLeaseOptions {
      * Default: 60,000.
      */
     readonly connectionLeaseTimeout?: number
-}
-
-/**
- * A sqlite query runner with `transactionDepth` widened from protected to public.
- *
- * The lease machinery lives outside the runner class hierarchy
- * and needs the transaction depth to determine whether a transaction is active.
- */
-export type SqliteLeasedQueryRunner = AbstractSqliteQueryRunner & {
-    transactionDepth: number
-}
-
-/**
- * One queued request for the connection lease.
- */
-export interface SqliteLeaseWaiter {
-    /**
-     * Grants the lease to this waiter to continue its acquire call.
-     */
-    grant: () => void
-    /**
-     * Timeout that removes this waiter from the queue and rejects its acquire call.
-     */
-    timer?: NodeJS.Timeout
-}
-
-/**
- * The properties a thrown sqlite error may carry.
- * Differs by sqlite driver.
- */
-export interface SqliteErrorLike {
-    readonly code?: unknown
-    readonly message?: unknown
-    readonly driverError?: { readonly code?: unknown }
 }

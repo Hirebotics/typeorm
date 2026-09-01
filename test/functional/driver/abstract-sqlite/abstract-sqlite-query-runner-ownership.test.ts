@@ -11,6 +11,7 @@ import { Thing } from "./entity/Thing"
 import {
     captureLog,
     captureSql,
+    executeOutOfBand,
     expectBothSqliteDrivers,
     SQLITE_DRIVERS,
     TEST_ENTITIES,
@@ -243,6 +244,35 @@ describe("sqlite driver > query runner ownership", () => {
 
                 // release() is idempotent.
                 await runner.release()
+            }),
+        )
+    })
+
+    it("should free the connection when the release rollback fails", () => {
+        return Promise.all(
+            connections.map(async (connection) => {
+                // Roll the transaction back behind the serializer's back.
+                // Sqlite then has no transaction while the serializer still
+                // believes one is open, so the ROLLBACK that release() issues
+                // fails for real.
+                // Without the recovery the connection would stay held for the
+                // life of the driver and every later runner would time out.
+                const abandoned = connection.createQueryRunner()
+                await abandoned.startTransaction()
+                await abandoned.manager.save(Thing, { name: "abandoned" })
+                await executeOutOfBand(connection, "ROLLBACK")
+
+                // release() must swallow the failure rather than throw.
+                await abandoned.release()
+
+                const startedAt = Date.now()
+                const names = (
+                    await connection.getRepository(Thing).find()
+                ).map((thing) => {
+                    return thing.name
+                })
+                expect(names).to.eql([])
+                expect(Date.now() - startedAt).to.be.lessThan(5000)
             }),
         )
     })
