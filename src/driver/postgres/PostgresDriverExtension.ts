@@ -1,10 +1,15 @@
 import { PostgresQueryRunner } from "./PostgresQueryRunner"
 
 /**
+ * Per-checkout hooks for the postgres connection pool.
+ * Hirebotics file, not part of upstream TypeORM.
+ */
+
+/**
  * Hooks that run when a postgres connection is checked out of the pool and handed back.
  *
- * The argument is the raw `pg` client the pool handed out. It is typed loosely because
- * typeorm does not depend on `pg`'s types.
+ * The argument is the raw `pg` client the pool handed out.
+ * It is typed loosely because typeorm does not depend on `pg`'s types.
  */
 export interface PostgresExtensionOptions {
     onConnect?: (pg: any) => Promise<void>
@@ -20,17 +25,18 @@ let registeredOptions: PostgresExtensionOptions | undefined
 /**
  * Query runner that runs the registered hooks around the pooled connection's lifetime.
  *
- * Use case: session-scoped state, such as a `SET app.current_tenant` on checkout that
- * must be reset before the connection returns to the pool.
+ * Use case: session-scoped state,
+ * such as a `SET app.current_tenant` on checkout
+ * that must be reset before the connection returns to the pool.
  */
 export class PostgresQueryRunnerExtension extends PostgresQueryRunner {
     private rawConnection: any
 
     async connect(): Promise<any> {
-        // super.connect() checks a client out of the pool only on the first call,
-        // afterwards it returns the memoized connection.
-        // query() calls connect() for every query, so guard the hook to fire
-        // once per real checkout rather than once per query.
+        // super.connect() checks a client out of the pool only on the first call.
+        // Afterwards it returns the memoized connection.
+        // query() calls connect() for every query,
+        // so guard the hook to fire once per real checkout rather than once per query.
         const alreadyConnected = !!(
             this.databaseConnection || this.databaseConnectionPromise
         )

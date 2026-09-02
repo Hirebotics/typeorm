@@ -62,17 +62,16 @@ export class BetterSqlite3QueryRunner extends AbstractSqliteQueryRunner {
      * Called before migrations are run.
      */
     async beforeMigration(): Promise<void> {
-        // Routed through query() on purpose, so the SQLITE_BUSY retry covers it.
-        // Migrations can start while another writer already holds the database.
-        await this.query(`PRAGMA foreign_keys = OFF`)
+        const databaseConnection = await this.connect()
+        databaseConnection.pragma("foreign_keys = OFF")
     }
 
     /**
      * Called after migrations are run.
      */
     async afterMigration(): Promise<void> {
-        // Routed through query() on purpose -- see beforeMigration().
-        await this.query(`PRAGMA foreign_keys = ON`)
+        const databaseConnection = await this.connect()
+        databaseConnection.pragma("foreign_keys = ON")
     }
 
     /**
@@ -97,8 +96,24 @@ export class BetterSqlite3QueryRunner extends AbstractSqliteQueryRunner {
         )
         const queryStartTime = Date.now()
 
+        const stmt = await this.getStmt(query)
+
         try {
-            const result = await this.executeWithBusyRetry(query, parameters)
+            const result = new QueryResult()
+
+            if (stmt.reader) {
+                const raw = stmt.all(...parameters)
+
+                result.raw = raw
+
+                if (Array.isArray(raw)) {
+                    result.records = raw
+                }
+            } else {
+                const raw = stmt.run(...parameters)
+                result.affected = raw.changes
+                result.raw = raw.lastInsertRowid
+            }
 
             // log slow queries if maxQueryExecution time is set
             const maxQueryExecutionTime =
@@ -133,147 +148,13 @@ export class BetterSqlite3QueryRunner extends AbstractSqliteQueryRunner {
             return result
         } catch (err) {
             connection.logger.logQueryError(err, query, parameters, this)
-            this.broadcaster.broadcastAfterQueryEvent(
-                broadcasterResult,
-                query,
-                parameters,
-                false,
-                undefined,
-                undefined,
-                err,
-            )
-
             throw new QueryFailedError(query, parameters, err)
-        } finally {
-            // Every other driver waits here.
-            // Caveat: a subscriber that rejects replaces the real query error.
-            await broadcasterResult.wait()
         }
     }
 
     // -------------------------------------------------------------------------
     // Protected Methods
     // -------------------------------------------------------------------------
-
-    /**
-     * Runs the query, retrying while sqlite reports the database is busy.
-     *
-     * A retry loop rather than the `timeout` option (sqlite3_busy_timeout) because
-     * better-sqlite3 is synchronous, so a busy timeout blocks the whole event loop --
-     * and sqlite never invokes the busy handler for SQLITE_BUSY_SNAPSHOT anyway.
-     *
-     * The broadcaster events stay in query() so they fire once per query, not once per attempt.
-     */
-    protected async executeWithBusyRetry(
-        query: string,
-        parameters: any[],
-    ): Promise<QueryResult> {
-        const { busyErrorRetryInterval = 0, busyErrorRetryLimit = 0 } =
-            this.driver.options
-
-        for (let attempt = 0; ; attempt++) {
-            try {
-                // getStmt() is inside the loop because prepare() reads the schema,
-                // so it can raise SQLITE_BUSY too.
-                return this.executeStmt(await this.getStmt(query), parameters)
-            } catch (err) {
-                // Retry is opt-in: with no interval configured, behave like upstream.
-                if (
-                    busyErrorRetryInterval <= 0 ||
-                    !this.isSqliteError(err, "SQLITE_BUSY")
-                )
-                    throw err
-
-                // SQLITE_BUSY_SNAPSHOT means the transaction's WAL snapshot went stale,
-                // and sqlite keeps that snapshot for the life of the transaction.
-                // Every retry then fails identically, so spend none of the budget on them.
-                // SQLITE_BUSY_RECOVERY is not treated this way: another process is rebuilding
-                // the WAL, which ends on its own, so retrying does clear it.
-                if (
-                    this.isSqliteError(err, "SQLITE_BUSY_SNAPSHOT") &&
-                    this.isTransactionOpen()
-                ) {
-                    this.driver.connection.logger.log(
-                        "warn",
-                        "SQLITE_BUSY_SNAPSHOT inside an open transaction cannot be resolved by retrying, " +
-                            "the transaction must be rolled back and replayed. Failing query immediately",
-                        this,
-                    )
-
-                    throw err
-                }
-
-                // A falsy limit means retry forever, matching the sqlite driver's busyErrorRetry.
-                if (busyErrorRetryLimit > 0 && attempt >= busyErrorRetryLimit) {
-                    this.driver.connection.logger.log(
-                        "warn",
-                        `Sqlite is busy and the retry limit of ${busyErrorRetryLimit} is reached, failing query`,
-                        this,
-                    )
-
-                    // Reject with the sqlite error itself, not a synthetic "gave up" error.
-                    throw err
-                }
-
-                this.driver.connection.logger.log(
-                    "info",
-                    `Sqlite is busy, retrying query in ${busyErrorRetryInterval}ms (retry ${
-                        attempt + 1
-                    } of ${busyErrorRetryLimit || "unlimited"})`,
-                    this,
-                )
-                await new Promise((ok) =>
-                    setTimeout(ok, busyErrorRetryInterval),
-                )
-            }
-        }
-    }
-
-    /**
-     * True when the sqlite connection sits inside an open transaction.
-     *
-     * Asks better-sqlite3 as well as this runner: every sqlite query runner shares the one
-     * driver connection, so a transaction another runner opened -- or a raw `BEGIN`, which
-     * never sets isTransactionActive -- pins a snapshot for this runner's queries too.
-     */
-    protected isTransactionOpen(): boolean {
-        return (
-            this.isTransactionActive ||
-            this.driver.databaseConnection?.inTransaction === true
-        )
-    }
-
-    /**
-     * True when `err` is a better-sqlite3 SqliteError whose code starts with `codePrefix`.
-     *
-     * Prefix and not equality, because SQLITE_BUSY_SNAPSHOT and SQLITE_BUSY_RECOVERY are
-     * separate codes that still mean "database is busy".
-     *
-     * @see https://github.com/WiseLibs/better-sqlite3/blob/master/lib/sqlite-error.js
-     */
-    protected isSqliteError(err: any, codePrefix: string): boolean {
-        return typeof err?.code === "string" && err.code.startsWith(codePrefix)
-    }
-
-    protected executeStmt(stmt: any, parameters: any[]): QueryResult {
-        const result = new QueryResult()
-
-        if (stmt.reader) {
-            const raw = stmt.all(...parameters)
-
-            result.raw = raw
-
-            if (Array.isArray(raw)) {
-                result.records = raw
-            }
-        } else {
-            const raw = stmt.run(...parameters)
-            result.affected = raw.changes
-            result.raw = raw.lastInsertRowid
-        }
-
-        return result
-    }
 
     protected async loadTableRecords(
         tablePath: string,
@@ -293,13 +174,9 @@ export class BetterSqlite3QueryRunner extends AbstractSqliteQueryRunner {
     }
     protected async loadPragmaRecords(tablePath: string, pragma: string) {
         const [database, tableName] = this.splitTablePath(tablePath)
-        // Routed through query() on purpose -- see beforeMigration().
-        // databaseConnection.pragma() bypasses the retry and falls back to
-        // better-sqlite3's synchronous timeout, which blocks the event loop.
-        const res = await this.query(
-            `PRAGMA ${
-                database ? `"${database}".` : ""
-            }${pragma}("${tableName}")`,
+        const databaseConnection = await this.connect()
+        const res = databaseConnection.pragma(
+            `${database ? `"${database}".` : ""}${pragma}("${tableName}")`,
         )
         return res
     }

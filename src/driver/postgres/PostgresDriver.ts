@@ -639,7 +639,11 @@ export class PostgresDriver implements Driver {
      * Creates a query runner used to execute database queries.
      */
     createQueryRunner(mode: ReplicationMode): PostgresQueryRunner {
-        // Always the extension subclass: it is a no-op until extendPostgresDriver() registers hooks.
+        // Hirebotics patch: return the extension subclass instead of PostgresQueryRunner.
+        // It runs the onConnect/onRelease hooks registered through extendPostgresDriver().
+        // Beacon uses the hooks to set per-request row-level security on pool checkout.
+        // It behaves exactly like PostgresQueryRunner until hooks are registered.
+        // Keep this override when merging upstream.
         return new PostgresQueryRunnerExtension(this, mode)
     }
 

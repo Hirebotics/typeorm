@@ -60,7 +60,6 @@ export abstract class AbstractSqliteQueryRunner
 
     /**
      * Releases used database connection.
-     * We just clear loaded tables and sql in memory, because sqlite do not support multiple connections thus query runners.
      */
     release(): Promise<void> {
         this.loadedTables = []

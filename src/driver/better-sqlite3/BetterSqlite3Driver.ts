@@ -7,7 +7,7 @@ import { ColumnType } from "../types/ColumnTypes"
 import { QueryRunner } from "../../query-runner/QueryRunner"
 import { AbstractSqliteDriver } from "../sqlite-abstract/AbstractSqliteDriver"
 import { BetterSqlite3ConnectionOptions } from "./BetterSqlite3ConnectionOptions"
-import { BetterSqlite3QueryRunner } from "./BetterSqlite3QueryRunner"
+import { SerializedBetterSqlite3QueryRunner } from "./SerializedBetterSqlite3QueryRunner"
 import { ReplicationMode } from "../types/ReplicationMode"
 import { filepathToName, isAbsolute } from "../../util/PathUtils"
 
@@ -60,10 +60,12 @@ export class BetterSqlite3Driver extends AbstractSqliteDriver {
      * Creates a query runner used to execute database queries.
      */
     createQueryRunner(mode: ReplicationMode): QueryRunner {
-        if (!this.queryRunner)
-            this.queryRunner = new BetterSqlite3QueryRunner(this)
-
-        return this.queryRunner
+        // Hirebotics patch: a fresh runner per caller, not upstream's one cached runner.
+        // A query runner owns a transaction.
+        // A shared runner lets two units of work collide in one transaction and lose writes.
+        // The serialized runner leases the single connection.
+        // Keep this override when merging upstream.
+        return new SerializedBetterSqlite3QueryRunner(this)
     }
 
     normalizeType(column: {
