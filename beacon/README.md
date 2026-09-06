@@ -19,27 +19,48 @@ then tears Postgres down and restores your `ormconfig.json`, even on failure or 
 
 ## What we patch
 
-| Driver                            | Change                                                                                                                                                                                   |
-| --------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **sqlite** and **better-sqlite3** | A query runner per caller, leased against the one connection, so concurrent units of work cannot land in a single transaction. Plus `BEGIN IMMEDIATE` and a bounded `SQLITE_BUSY` retry. |
-| **postgres**                      | `onConnect` / `onRelease` pool hooks via `extendPostgresDriver()`. Beacon uses these for per-request row-level security (`SET app.current_tenant`).                                      |
+| Driver                            | Change                                                                                                                                                                                          |
+| --------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **sqlite** and **better-sqlite3** | A query runner per caller, each holding the one connection from its first statement until `release()`, so concurrent units of work cannot land in a single transaction. Plus `BEGIN IMMEDIATE`. |
+| **postgres**                      | `onConnect` / `onRelease` pool hooks via `extendPostgresDriver()`. Beacon uses these for per-request row-level security (`SET app.current_tenant`).                                             |
 
-The sqlite work lives in four fork-owned files:
+The sqlite work is one fork-owned file, `src/driver/sqlite-abstract/SqliteConnectionLock.ts`,
+plus edits to four upstream files. Every edit carries a `Hirebotics patch:` comment.
 
--   `src/driver/sqlite-abstract/SqliteConnectionLease.ts`
--   `src/driver/sqlite-abstract/sqlite.types.ts`
--   `src/driver/sqlite/SerializedSqliteQueryRunner.ts`
--   `src/driver/better-sqlite3/SerializedBetterSqlite3QueryRunner.ts`
+### Why there is a lock at all
 
-The only upstream edits are the two `createQueryRunner` bodies and the option declarations,
-which keeps the rebase cost off the files upstream actively rewrites.
+sqlite supports many connections to one file; TypeORM's sqlite driver just holds one.
+The connection stays single because **each connection to `:memory:` is a separate database**,
+and consumers run `:memory:` in tests. That is what makes the lock necessary, not any limit in sqlite.
+
+sqlite's own busy handler cannot do this job. Two runners on one connection do not contend for a
+file lock — the second `BEGIN` fails `SQLITE_ERROR`, not `SQLITE_BUSY` — and a busy wait would
+block the event loop that the holder needs in order to reach its `COMMIT`.
+
+### Why there is no retry code
+
+`BEGIN IMMEDIATE` is what fixes the `SQLITE_BUSY` alerts, not retrying.
+
+sqlite's busy handler is **never invoked** for `SQLITE_BUSY_SNAPSHOT`, the error a deferred
+`BEGIN` hits when another connection wrote between its read snapshot and its first write.
+Measured identical at `busy_timeout` 0, 1000 and 5000: it fails instantly at every value.
+Retrying it can never succeed either — 10 of 10 attempts failed against an otherwise idle
+database, because the connection's snapshot is permanently stale.
+
+That is why BEACON-1491's retry fix did not stop the alerts, and why BEACON-1684 saw a
+multi-second freeze: ten retries of an error that cannot clear.
+
+Once `BEGIN IMMEDIATE` removes that error class and the lock removes same-process contention,
+the only `SQLITE_BUSY` left comes from PowerSync's own connection, and sqlite's `busy_timeout`
+handles that correctly in C.
+
+The fork exposes one option, `connectionLeaseTimeout`, to tune the acquire deadline.
 
 Covered by:
 
--   `test/functional/driver/abstract-sqlite/sqlite-connection-lease-unit.test.ts`
 -   `test/functional/driver/abstract-sqlite/abstract-sqlite-query-runner-ownership.test.ts`
 -   `test/functional/driver/abstract-sqlite/abstract-sqlite-begin-immediate.test.ts`
--   `test/functional/driver/abstract-sqlite/abstract-sqlite-busy-error-retry.test.ts`
+-   `test/functional/driver/abstract-sqlite/abstract-sqlite-escape-query-parameters.test.ts`
 -   `test/functional/driver/postgres/postgres-driver-extension.test.ts`
 
 ### Writing sqlite concurrency tests
@@ -56,9 +77,9 @@ so a test written that way silently measures nothing.
 `sqlite-lease-test-utils.ts` handles all of that,
 so use `openSecondHandle()` and do not open a handle of your own.
 
-Avoid `timeout: 0`: it hides the event-loop freeze the retry tests exist to catch.
-better-sqlite3 blocks inside C for the busy timeout on every attempt,
-so a test that zeroes the timeout never sees the cost that production pays.
+A concurrency test must assert against a contended lock, not an idle one.
+A double release is harmless when nobody is queued, so queue the waiters **before**
+the release you are testing, or the test passes with the code removed.
 
 ## Do not run `pnpm test` directly
 
