@@ -22,6 +22,7 @@ import { View } from "../../schema-builder/view/View"
 import { TableForeignKey } from "../../schema-builder/table/TableForeignKey"
 import { InstanceChecker } from "../../util/InstanceChecker"
 import { UpsertType } from "../types/UpsertType"
+import { SqliteConnectionLock } from "./SqliteConnectionLock"
 
 type DatabasesMap = Record<
     string,
@@ -49,6 +50,12 @@ export abstract class AbstractSqliteDriver implements Driver {
      * Sqlite has a single QueryRunner because it works on a single database connection.
      */
     queryRunner?: QueryRunner
+
+    /**
+     * Hirebotics patch: serializes query runners against the single connection.
+     * Only the drivers Beacon uses create one, so the other sqlite drivers are unaffected.
+     */
+    connectionLock?: SqliteConnectionLock
 
     /**
      * Real database connection with sqlite database.
@@ -272,6 +279,17 @@ export abstract class AbstractSqliteDriver implements Driver {
     }
 
     /**
+     * Hirebotics patch: opts this driver into serialized query runners.
+     * Called by the drivers Beacon uses; the rest keep upstream's behaviour.
+     */
+    protected createConnectionLock(): void {
+        const { connectionLeaseTimeout } = this.options as {
+            connectionLeaseTimeout?: number
+        }
+        this.connectionLock = new SqliteConnectionLock(connectionLeaseTimeout)
+    }
+
+    /**
      * Makes any action after connection (e.g. create extensions in Postgres driver).
      */
     afterConnect(): Promise<void> {
@@ -284,10 +302,20 @@ export abstract class AbstractSqliteDriver implements Driver {
     async disconnect(): Promise<void> {
         return new Promise<void>((ok, fail) => {
             this.queryRunner = undefined
+            this.destroyConnectionLock()
             this.databaseConnection.close((err: any) =>
                 err ? fail(err) : ok(),
             )
         })
+    }
+
+    /**
+     * Hirebotics patch: fails everyone queued for a connection that is closing.
+     * Without it a waiter is later granted a closed handle.
+     */
+    protected destroyConnectionLock(): void {
+        this.connectionLock?.destroy()
+        this.connectionLock = undefined
     }
 
     hasAttachedDatabases(): boolean {

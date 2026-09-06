@@ -15,6 +15,14 @@ export interface SqliteConnectionOptions extends BaseDataSourceOptions {
     readonly database: string
 
     /**
+     * Hirebotics patch: milliseconds a query runner waits for a connection.
+     * Should outlast the longest transaction else may reject prematurely.
+     *
+     * Default: 60,000.
+     */
+    readonly connectionLeaseTimeout?: number
+
+    /**
      * The driver object
      * This defaults to require("sqlite3")
      */

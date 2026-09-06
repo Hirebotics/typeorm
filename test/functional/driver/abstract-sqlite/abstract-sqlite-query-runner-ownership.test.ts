@@ -428,9 +428,9 @@ describe("sqlite driver > query runner ownership > lease timeout", () => {
                 expect(message).to.match(
                     /Timed out after \d+ms waiting for the sqlite connection/,
                 )
-                // Names both sides, so the offending call site is identifiable from the log.
-                expect(message).to.contain("Waiting to run: SELECT 1")
-                expect(message).to.contain("Blocked by:")
+                // The lock is taken in connect(), before any SQL is known, so the
+                // message names the cause rather than the statement.
+                expect(message).to.contain("query runner was never released")
                 expect(Date.now() - startedAt).to.be.lessThan(5000)
             }),
         )
@@ -474,6 +474,9 @@ describe("sqlite driver > query runner ownership > lease timeout", () => {
                         .should.be.rejectedWith(/Timed out after \d+ms/)
 
                     await holder.commitTransaction()
+                    // The holder keeps the connection until it is released,
+                    // not until its transaction commits.
+                    await holder.release()
 
                     // The failed acquisition must not be cached on the runner.
                     await waiter.query("SELECT 1")

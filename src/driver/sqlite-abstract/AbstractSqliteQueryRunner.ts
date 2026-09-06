@@ -38,6 +38,11 @@ export abstract class AbstractSqliteQueryRunner
 
     protected transactionPromise: Promise<any> | null = null
 
+    // Hirebotics patch: this runner's claim on the single connection.
+    protected connectPromise?: Promise<any>
+    protected releaseConnectionLock?: () => void
+    protected isReleasing = false
+
     // -------------------------------------------------------------------------
     // Constructor
     // -------------------------------------------------------------------------
@@ -55,16 +60,80 @@ export abstract class AbstractSqliteQueryRunner
      * Returns obtained database connection.
      */
     connect(): Promise<any> {
-        return Promise.resolve(this.driver.databaseConnection)
+        // Hirebotics patch: this runner holds the connection until release().
+        // Every path to sqlite awaits connect(), so acquire the lock here.
+        if (!this.connectPromise) {
+            this.connectPromise = this.acquireConnectionLock()
+        }
+        return this.connectPromise
+    }
+
+    private async acquireConnectionLock(): Promise<any> {
+        try {
+            this.releaseConnectionLock =
+                await this.driver.connectionLock?.acquire(this.constructor.name)
+        } catch (err) {
+            // Let the next statement try again rather than caching the failure.
+            this.connectPromise = undefined
+            throw err
+        }
+        return this.driver.databaseConnection
     }
 
     /**
      * Releases used database connection.
+     *
+     * Hirebotics patch: upstream said sqlite cannot support multiple query runners.
+     * It can. A query runner owns a transaction, not a connection.
      */
-    release(): Promise<void> {
-        this.loadedTables = []
-        this.clearSqlMemory()
-        return Promise.resolve()
+    async release(): Promise<void> {
+        if (!this.driver.connectionLock) {
+            // This driver did not opt in to serialized runners.
+            // Upstream behaviour: clear memory and keep the runner reusable.
+            this.loadedTables = []
+            this.clearSqlMemory()
+            return
+        }
+        if (this.isReleased || this.isReleasing) {
+            return
+        }
+        // Set before the rollback is awaited, so a concurrent query() cannot run
+        // against a runner that is going away and be told it succeeded.
+        this.isReleasing = true
+        try {
+            if (this.connectPromise) {
+                await this.rollbackAbandonedTransaction()
+            }
+        } finally {
+            this.releaseConnectionLock?.()
+            this.releaseConnectionLock = undefined
+            this.connectPromise = undefined
+            this.isTransactionActive = false
+            this.transactionDepth = 0
+            this.isReleased = true
+            this.loadedTables = []
+            this.clearSqlMemory()
+        }
+    }
+
+    /**
+     * Rolls back whatever this runner left open.
+     *
+     * Always attempted, never gated on isTransactionActive: a caller that issued a raw
+     * BEGIN never sets that flag, and the transaction would then outlive the runner and
+     * fail every later BEGIN on the connection with SQLITE_ERROR.
+     * A ROLLBACK with nothing to roll back throws, which is how this tells the two apart.
+     */
+    private async rollbackAbandonedTransaction(): Promise<void> {
+        try {
+            await this.query("ROLLBACK")
+        } catch {
+            return
+        }
+        this.driver.connection.logger.log(
+            "warn",
+            `Query runner released with a transaction still open. Rolled it back.`,
+        )
     }
 
     /**
@@ -107,7 +176,10 @@ export abstract class AbstractSqliteQueryRunner
                     await this.query("PRAGMA read_uncommitted = false")
                 }
             }
-            await this.query("BEGIN TRANSACTION")
+            // Hirebotics patch: IMMEDIATE takes the write lock up front.
+            // A deferred BEGIN fails SQLITE_BUSY_SNAPSHOT on its first write when
+            // another connection wrote in between, which no retry can ever clear.
+            await this.query("BEGIN IMMEDIATE")
         } else {
             await this.query(`SAVEPOINT typeorm_${this.transactionDepth}`)
         }

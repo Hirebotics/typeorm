@@ -7,7 +7,7 @@ import { ColumnType } from "../types/ColumnTypes"
 import { QueryRunner } from "../../query-runner/QueryRunner"
 import { AbstractSqliteDriver } from "../sqlite-abstract/AbstractSqliteDriver"
 import { BetterSqlite3ConnectionOptions } from "./BetterSqlite3ConnectionOptions"
-import { SerializedBetterSqlite3QueryRunner } from "./SerializedBetterSqlite3QueryRunner"
+import { BetterSqlite3QueryRunner } from "./BetterSqlite3QueryRunner"
 import { ReplicationMode } from "../types/ReplicationMode"
 import { filepathToName, isAbsolute } from "../../util/PathUtils"
 
@@ -53,6 +53,8 @@ export class BetterSqlite3Driver extends AbstractSqliteDriver {
      */
     async disconnect(): Promise<void> {
         this.queryRunner = undefined
+        // Hirebotics patch: fail anyone queued for a connection that is closing.
+        this.destroyConnectionLock()
         this.databaseConnection.close()
     }
 
@@ -61,11 +63,9 @@ export class BetterSqlite3Driver extends AbstractSqliteDriver {
      */
     createQueryRunner(mode: ReplicationMode): QueryRunner {
         // Hirebotics patch: a fresh runner per caller, not upstream's one cached runner.
-        // A query runner owns a transaction.
-        // A shared runner lets two units of work collide in one transaction and lose writes.
-        // The serialized runner leases the single connection.
-        // Keep this override when merging upstream.
-        return new SerializedBetterSqlite3QueryRunner(this)
+        // A runner owns a transaction; sharing one loses the second caller's writes.
+        // AbstractSqliteQueryRunner.connect() serializes them on the single connection.
+        return new BetterSqlite3QueryRunner(this)
     }
 
     normalizeType(column: {
@@ -125,6 +125,9 @@ export class BetterSqlite3Driver extends AbstractSqliteDriver {
      * Creates connection with the database.
      */
     protected async createDatabaseConnection() {
+        // Hirebotics patch: opts this driver into serialized query runners.
+        this.createConnectionLock()
+
         // not to create database directory if is in memory
         if (this.options.database !== ":memory:")
             await this.createDatabaseDirectory(

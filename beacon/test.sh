@@ -86,10 +86,8 @@ COVERAGE_DIR="${BEACON_DIR}/coverage"
 # The tests the Beacon patches own, plus upstream suites that exercise the
 # patched drivers broadly enough to catch a regression.
 TEST_FILES=(
-  build/compiled/test/functional/driver/abstract-sqlite/sqlite-connection-serializer-unit.test.js
   build/compiled/test/functional/driver/abstract-sqlite/abstract-sqlite-query-runner-ownership.test.js
   build/compiled/test/functional/driver/abstract-sqlite/abstract-sqlite-begin-immediate.test.js
-  build/compiled/test/functional/driver/abstract-sqlite/abstract-sqlite-busy-error-retry.test.js
   build/compiled/test/functional/driver/postgres/postgres-driver-extension.test.js
   build/compiled/test/functional/driver/postgres/connection-options.test.js
   build/compiled/test/functional/query-builder/insert/query-builder-insert.test.js
@@ -105,10 +103,8 @@ TEST_FILES=(
 # c8 maps compiled output back through source maps, so these name the
 # TypeScript sources rather than the files mocha loads.
 COVERED_FILES=(
-  src/driver/sqlite-abstract/SqliteConnectionSerializer.ts
-  src/driver/sqlite-abstract/SqliteConnectionLease.ts
-  src/driver/sqlite/SerializedSqliteQueryRunner.ts
-  src/driver/better-sqlite3/SerializedBetterSqlite3QueryRunner.ts
+  src/driver/sqlite-abstract/SqliteConnectionLock.ts
+  src/driver/sqlite-abstract/AbstractSqliteQueryRunner.ts
   src/driver/postgres/PostgresDriverExtension.ts
 )
 

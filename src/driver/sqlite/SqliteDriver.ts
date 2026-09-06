@@ -1,7 +1,7 @@
 import fs from "fs/promises"
 import path from "path"
 import { DriverPackageNotInstalledError } from "../../error/DriverPackageNotInstalledError"
-import { SerializedSqliteQueryRunner } from "./SerializedSqliteQueryRunner"
+import { SqliteQueryRunner } from "./SqliteQueryRunner"
 import { PlatformTools } from "../../platform/PlatformTools"
 import { DataSource } from "../../data-source/DataSource"
 import { SqliteConnectionOptions } from "./SqliteConnectionOptions"
@@ -53,6 +53,8 @@ export class SqliteDriver extends AbstractSqliteDriver {
     async disconnect(): Promise<void> {
         return new Promise<void>((ok, fail) => {
             this.queryRunner = undefined
+            // Hirebotics patch: fail anyone queued for a connection that is closing.
+            this.destroyConnectionLock()
             this.databaseConnection.close((err: any) =>
                 err ? fail(err) : ok(),
             )
@@ -64,11 +66,9 @@ export class SqliteDriver extends AbstractSqliteDriver {
      */
     createQueryRunner(mode: ReplicationMode): QueryRunner {
         // Hirebotics patch: a fresh runner per caller, not upstream's one cached runner.
-        // A query runner owns a transaction.
-        // A shared runner lets two units of work collide in one transaction and lose writes.
-        // The serialized runner leases the single connection.
-        // Keep this override when merging upstream.
-        return new SerializedSqliteQueryRunner(this)
+        // A runner owns a transaction; sharing one loses the second caller's writes.
+        // AbstractSqliteQueryRunner.connect() serializes them on the single connection.
+        return new SqliteQueryRunner(this)
     }
 
     normalizeType(column: {
@@ -128,6 +128,9 @@ export class SqliteDriver extends AbstractSqliteDriver {
      * Creates connection with the database.
      */
     protected async createDatabaseConnection() {
+        // Hirebotics patch: opts this driver into serialized query runners.
+        this.createConnectionLock()
+
         if (
             this.options.flags === undefined ||
             !(this.options.flags & this.sqlite.OPEN_URI)
