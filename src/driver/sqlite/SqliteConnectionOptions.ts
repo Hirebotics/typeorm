@@ -1,12 +1,9 @@
 import { BaseDataSourceOptions } from "../../data-source/BaseDataSourceOptions"
-import { SqliteLeaseOptions } from "../sqlite-abstract/sqlite.types"
 
 /**
  * Sqlite-specific connection options.
  */
-export interface SqliteConnectionOptions
-    extends BaseDataSourceOptions,
-        SqliteLeaseOptions {
+export interface SqliteConnectionOptions extends BaseDataSourceOptions {
     /**
      * Database type.
      */
@@ -38,11 +35,6 @@ export interface SqliteConnectionOptions
      *
      * Enabling WAL can improve your app performance and face less SQLITE_BUSY issues.
      * Time in milliseconds.
-     *
-     * @deprecated Retries forever, and only on this driver.
-     * Use busyErrorRetryInterval and busyErrorRetryTimeout instead:
-     * they are bounded, and they work the same way on better-sqlite3.
-     * Setting both turns on two nested retry loops.
      */
     readonly busyErrorRetry?: number
 

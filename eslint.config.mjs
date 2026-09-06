@@ -79,6 +79,14 @@ export default defineConfig([
             "no-regex-spaces": "warn",
         },
     },
+    // Hirebotics patch: dropped upstream's "flat/recommended-typescript" preset.
+    // It adds 5172 unactionable warnings. valid-types is the only rule set to error.
+    jsdoc({
+        files: ["src/**/*.ts"],
+        rules: {
+            "jsdoc/valid-types": "error",
+        },
+    }),
     {
         files: ["test/**/*.ts"],
         ...pluginChaiFriendly.configs.recommendedFlat,

@@ -1,12 +1,9 @@
 import { BaseDataSourceOptions } from "../../data-source/BaseDataSourceOptions"
-import { SqliteLeaseOptions } from "../sqlite-abstract/sqlite.types"
 
 /**
  * Sqlite-specific connection options.
  */
-export interface BetterSqlite3ConnectionOptions
-    extends BaseDataSourceOptions,
-        SqliteLeaseOptions {
+export interface BetterSqlite3ConnectionOptions extends BaseDataSourceOptions {
     /**
      * Database type.
      */
