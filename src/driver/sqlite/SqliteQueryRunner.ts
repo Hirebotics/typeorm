@@ -1,6 +1,5 @@
 import { ConnectionIsNotSetError } from "../../error/ConnectionIsNotSetError"
 import { QueryFailedError } from "../../error/QueryFailedError"
-import { QueryRunnerAlreadyReleasedError } from "../../error/QueryRunnerAlreadyReleasedError"
 import { QueryResult } from "../../query-runner/QueryResult"
 import { Broadcaster } from "../../subscriber/Broadcaster"
 import { BroadcasterResult } from "../../subscriber/BroadcasterResult"
@@ -53,7 +52,8 @@ export class SqliteQueryRunner extends AbstractSqliteQueryRunner {
         parameters?: any[],
         useStructuredResult = false,
     ): Promise<any> {
-        if (this.isReleased) throw new QueryRunnerAlreadyReleasedError()
+        // Hirebotics patch: also refuses while release() is in flight.
+        this.assertNotReleased()
 
         const connection = this.driver.connection
         const options = connection.options as SqliteConnectionOptions

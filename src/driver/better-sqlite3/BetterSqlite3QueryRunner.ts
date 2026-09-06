@@ -1,4 +1,3 @@
-import { QueryRunnerAlreadyReleasedError } from "../../error/QueryRunnerAlreadyReleasedError"
 import { QueryFailedError } from "../../error/QueryFailedError"
 import { AbstractSqliteQueryRunner } from "../sqlite-abstract/AbstractSqliteQueryRunner"
 import { Broadcaster } from "../../subscriber/Broadcaster"
@@ -82,7 +81,8 @@ export class BetterSqlite3QueryRunner extends AbstractSqliteQueryRunner {
         parameters: any[] = [],
         useStructuredResult = false,
     ): Promise<any> {
-        if (this.isReleased) throw new QueryRunnerAlreadyReleasedError()
+        // Hirebotics patch: also refuses while release() is in flight.
+        this.assertNotReleased()
 
         const connection = this.driver.connection
 

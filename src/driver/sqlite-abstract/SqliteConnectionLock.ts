@@ -24,7 +24,6 @@ const DEFAULT_ACQUIRE_TIMEOUT_MS = 60_000
 interface SqliteLockWaiter {
     grant: () => void
     reject: (err: Error) => void
-    describe: string
 }
 
 export class SqliteConnectionLock {
@@ -40,9 +39,9 @@ export class SqliteConnectionLock {
      * The returned function is the only way to give it back, so a caller cannot
      * release a lock it does not hold or release the same one twice.
      */
-    async acquire(describe: string): Promise<() => void> {
+    async acquire(): Promise<() => void> {
         if (this.isHeld) {
-            await this.waitInQueue(describe)
+            await this.waitInQueue()
         }
         this.isHeld = true
 
@@ -68,20 +67,16 @@ export class SqliteConnectionLock {
         for (const waiter of queued) {
             waiter.reject(
                 new TypeORMError(
-                    `The DataSource was destroyed while waiting for the sqlite connection. Waiting to run: ${waiter.describe}.`,
+                    `The DataSource was destroyed while waiting for the sqlite connection.`,
                 ),
             )
         }
     }
 
-    private async waitInQueue(describe: string): Promise<void> {
+    private async waitInQueue(): Promise<void> {
         const startedAtMs = Date.now()
         await new Promise<void>((resolve, reject) => {
-            const waiter: SqliteLockWaiter = {
-                describe,
-                grant: resolve,
-                reject,
-            }
+            const waiter: SqliteLockWaiter = { grant: resolve, reject }
             const timer = setTimeout(() => {
                 this.removeWaiter(waiter)
                 reject(this.buildTimeoutError(startedAtMs))

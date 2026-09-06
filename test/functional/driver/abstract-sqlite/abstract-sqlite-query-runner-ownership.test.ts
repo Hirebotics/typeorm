@@ -366,6 +366,160 @@ describe("sqlite driver > query runner ownership", () => {
         )
     })
 
+    it("should refuse a statement that races release(), rather than committing it in autocommit", () => {
+        return Promise.all(
+            connections.map(async (connection) => {
+                const runner = connection.createQueryRunner()
+                let racingOutcome = "never ran"
+                try {
+                    await runner.startTransaction()
+                    await runner.query(
+                        `INSERT INTO thing (name) VALUES ('inside-transaction')`,
+                    )
+
+                    // release() rolls back the abandoned transaction. A statement
+                    // arriving during that rollback must not slip through and commit
+                    // on its own.
+                    const releasing = runner.release()
+                    const racing = runner
+                        .query(
+                            `INSERT INTO thing (name) VALUES ('after-release')`,
+                        )
+                        .then(
+                            () => "resolved",
+                            (err: Error) => err.constructor.name,
+                        )
+                    ;[, racingOutcome] = await Promise.all([releasing, racing])
+                } finally {
+                    await runner.release()
+                }
+
+                expect(racingOutcome).to.equal(
+                    QueryRunnerAlreadyReleasedError.name,
+                )
+                // Neither row survives: the first was rolled back, the second refused.
+                const names = (
+                    await connection.getRepository(Thing).find()
+                ).map((thing) => thing.name)
+                expect(names).to.eql([])
+            }),
+        )
+    })
+
+    it("should hand the connection back exactly once when release() is called twice concurrently", () => {
+        return Promise.all(
+            connections.map(async (connection) => {
+                const holder = connection.createQueryRunner()
+                const first = connection.createQueryRunner()
+                const second = connection.createQueryRunner()
+                try {
+                    await holder.startTransaction()
+
+                    // Both queue behind the holder before it is released, so a double
+                    // release grants the connection to two runners at the same time -
+                    // the exact collision this patch exists to prevent.
+                    let hasFirstStarted = false
+                    let hasSecondStarted = false
+                    const firstBegin = first.startTransaction().then(() => {
+                        hasFirstStarted = true
+                    })
+                    const secondBegin = second.startTransaction().then(() => {
+                        hasSecondStarted = true
+                    })
+
+                    await holder.rollbackTransaction()
+                    await Promise.all([holder.release(), holder.release()])
+
+                    await firstBegin
+                    expect(hasFirstStarted).to.equal(true)
+                    expect(hasSecondStarted).to.equal(false)
+
+                    await first.commitTransaction()
+                    await first.release()
+                    await secondBegin
+                    expect(hasSecondStarted).to.equal(true)
+                    await second.commitTransaction()
+                } finally {
+                    await second.release()
+                    await first.release()
+                    await holder.release()
+                }
+            }),
+        )
+    })
+
+    it("should release an unused runner promptly while another holds a transaction", () => {
+        return Promise.all(
+            connections.map(async (connection) => {
+                const holder = connection.createQueryRunner()
+                const unused = connection.createQueryRunner()
+                try {
+                    await holder.startTransaction()
+
+                    // This runner never ran a statement, so it holds nothing and must
+                    // not wait on the connection just to be released.
+                    const startedAt = Date.now()
+                    await unused.release()
+                    expect(Date.now() - startedAt).to.be.lessThan(1000)
+                } finally {
+                    await holder.rollbackTransaction()
+                    await holder.release()
+                }
+            }),
+        )
+    })
+
+    it("should reject a queued runner when the DataSource is destroyed", () => {
+        return Promise.all(
+            connections.map(async (connection) => {
+                const holder = connection.createQueryRunner()
+                await holder.startTransaction()
+
+                // Queues behind the transaction and never gets the connection.
+                const queued = connection
+                    .createQueryRunner()
+                    .query("SELECT 1")
+                    .then(
+                        () => "resolved",
+                        (err: Error) => err.message,
+                    )
+
+                const startedAt = Date.now()
+                await connection.destroy()
+                const outcome = await queued
+
+                // Without teardown the waiter either burns the full acquire deadline
+                // or is granted a handle that is already closed.
+                expect(outcome).to.contain("DataSource was destroyed")
+                expect(Date.now() - startedAt).to.be.lessThan(5000)
+
+                await connection.initialize()
+            }),
+        )
+    })
+
+    it("should serve a new connection after destroy() with a transaction still open", () => {
+        return Promise.all(
+            connections.map(async (connection) => {
+                const abandoned = connection.createQueryRunner()
+                await abandoned.startTransaction()
+                await abandoned.query(
+                    `INSERT INTO thing (name) VALUES ('abandoned')`,
+                )
+
+                // The lock must not outlive the handle it was guarding. Beacon
+                // destroys and re-initializes the same DataSource on every boot,
+                // and a carried-over lock fails the first statement of the new one.
+                await connection.destroy()
+                await connection.initialize()
+
+                const startedAt = Date.now()
+                await connection.query("SELECT 1")
+                expect(Date.now() - startedAt).to.be.lessThan(5000)
+            }),
+        )
+    })
+
     it("should not share the lease between data sources", async () => {
         // A regression to one module-global lease would serialize unrelated databases.
         // It can deadlock an app coordinating two of them.

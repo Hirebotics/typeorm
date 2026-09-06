@@ -1,5 +1,6 @@
 import { QueryRunner } from "../../query-runner/QueryRunner"
 import { ObjectLiteral } from "../../common/ObjectLiteral"
+import { QueryRunnerAlreadyReleasedError } from "../../error/QueryRunnerAlreadyReleasedError"
 import { TransactionNotStartedError } from "../../error/TransactionNotStartedError"
 import { TableColumn } from "../../schema-builder/table/TableColumn"
 import { Table } from "../../schema-builder/table/Table"
@@ -42,6 +43,7 @@ export abstract class AbstractSqliteQueryRunner
     protected connectPromise?: Promise<any>
     protected releaseConnectionLock?: () => void
     protected isReleasing = false
+    private isReleaseRollback = false
 
     // -------------------------------------------------------------------------
     // Constructor
@@ -59,6 +61,19 @@ export abstract class AbstractSqliteQueryRunner
      * Creates/uses database connection from the connection pool to perform further operations.
      * Returns obtained database connection.
      */
+    /**
+     * Hirebotics patch: refuses statements from a runner that is going away.
+     * isReleased is only set after release() rolls back an abandoned transaction, so
+     * without the isReleasing half a statement racing release() commits in autocommit
+     * and its caller is told it succeeded while the row is discarded.
+     * The rollback release() issues is the one statement allowed through.
+     */
+    protected assertNotReleased(): void {
+        if (this.isReleased || (this.isReleasing && !this.isReleaseRollback)) {
+            throw new QueryRunnerAlreadyReleasedError()
+        }
+    }
+
     connect(): Promise<any> {
         // Hirebotics patch: this runner holds the connection until release().
         // Every path to sqlite awaits connect(), so acquire the lock here.
@@ -71,7 +86,7 @@ export abstract class AbstractSqliteQueryRunner
     private async acquireConnectionLock(): Promise<any> {
         try {
             this.releaseConnectionLock =
-                await this.driver.connectionLock?.acquire(this.constructor.name)
+                await this.driver.connectionLock?.acquire()
         } catch (err) {
             // Let the next statement try again rather than caching the failure.
             this.connectPromise = undefined
@@ -97,8 +112,8 @@ export abstract class AbstractSqliteQueryRunner
         if (this.isReleased || this.isReleasing) {
             return
         }
-        // Set before the rollback is awaited, so a concurrent query() cannot run
-        // against a runner that is going away and be told it succeeded.
+        // Set before the rollback is awaited, so a statement racing release() is
+        // refused rather than committed in autocommit behind the rollback.
         this.isReleasing = true
         try {
             if (this.connectPromise) {
@@ -125,8 +140,14 @@ export abstract class AbstractSqliteQueryRunner
      * A ROLLBACK with nothing to roll back throws, which is how this tells the two apart.
      */
     private async rollbackAbandonedTransaction(): Promise<void> {
+        // Raised for the synchronous part of the call only. query() checks the guard
+        // before its first await, so lowering it here admits this one statement and
+        // still refuses anything that arrives while the rollback is in flight.
+        this.isReleaseRollback = true
+        const rollback = this.query("ROLLBACK")
+        this.isReleaseRollback = false
         try {
-            await this.query("ROLLBACK")
+            await rollback
         } catch {
             return
         }
