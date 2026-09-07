@@ -1,6 +1,6 @@
 # Hirebotics TypeORM fork
 
-Fork of TypeORM consumed by beacon3's packages/cloud-connector (sqlite and better-sqlite3)
+Fork of TypeORM consumed by beacon's packages/cloud-connector (sqlite and better-sqlite3)
 and packages/server (postgres). Support only those drivers and Node.
 Do not add compatibility for runtimes or libraries the consumers do not use.
 
