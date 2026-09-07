@@ -184,4 +184,28 @@ describe("postgres driver > connection lifecycle hooks", () => {
                 expect(queryRunner.isReleased).to.equal(true)
             }),
         ))
+
+    it("skips the cleanup hook when a client error already destroyed the connection", () =>
+        Promise.all(
+            connections.map(async (connection) => {
+                // A client "error" event calls releasePostgresConnection() directly,
+                // which destroys the client without passing through release().
+                // Running the cleanup then would issue SQL on a dead client.
+                let hasCleanupRun = false
+                extendPostgresDriver({
+                    onRelease: async () => {
+                        hasCleanupRun = true
+                    },
+                })
+
+                const queryRunner = connection.createQueryRunner()
+                const client = await queryRunner.connect()
+
+                client.emit("error", new Error("client blew up"))
+                expect(queryRunner.isReleased).to.equal(true)
+
+                await queryRunner.release()
+                expect(hasCleanupRun).to.equal(false)
+            }),
+        ))
 })
