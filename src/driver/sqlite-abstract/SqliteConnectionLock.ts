@@ -30,9 +30,7 @@ export class SqliteConnectionLock {
     private isHeld = false
     private waiters: SqliteLockWaiter[] = []
 
-    constructor(
-        private readonly acquireTimeoutMs = DEFAULT_ACQUIRE_TIMEOUT_MS,
-    ) {}
+    constructor(private acquireTimeoutMs = DEFAULT_ACQUIRE_TIMEOUT_MS) {}
 
     /**
      * Grants the connection, first come first served.
@@ -100,10 +98,9 @@ export class SqliteConnectionLock {
      * seconds late and a message quoting the deadline would understate the hold.
      */
     private buildTimeoutError(startedAtMs: number): TypeORMError {
+        const elapsedMs = Date.now() - startedAtMs
         return new TypeORMError(
-            `Timed out after ${
-                Date.now() - startedAtMs
-            }ms waiting for the sqlite connection. ` +
+            `Timed out after ${elapsedMs}ms waiting for the sqlite connection. ` +
                 `A query runner was never released, or a second query runner was ` +
                 `created while the first still held an open transaction.`,
         )
