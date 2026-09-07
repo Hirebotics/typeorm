@@ -29,20 +29,16 @@ let registeredOptions: PostgresExtensionOptions | undefined
  * such as a `SET app.current_tenant` on checkout
  * that must be reset before the connection returns to the pool.
  *
- * onRelease must clear everything onConnect set, unconditionally. It can run in a
- * different async context from onConnect, so it cannot decide what to clear by
- * reading ambient request state. A skipped cleanup re-pools the client with that
- * state still on it, and the next borrower inherits it.
+ * The `onRelease` option must clear everything `onConnect` set
+ * because it can run in a different async context from `onConnect`,
+ * so it cannot decide what to clear by reading ambient request state.
+ * A skipped cleanup leaks state to the next borrower.
  */
 export class PostgresQueryRunnerExtension extends PostgresQueryRunner {
     private rawConnection: any
 
     /**
      * Resolves only once the pool checkout *and* onConnect have both finished.
-     *
-     * super.connect() publishes its own promise before this hook can run, so
-     * without a second promise covering both, a concurrent caller would be
-     * handed the client while setup was still in flight.
      */
     private checkoutPromise: Promise<any> | undefined
 
@@ -59,10 +55,8 @@ export class PostgresQueryRunnerExtension extends PostgresQueryRunner {
                 try {
                     await registeredOptions.onRelease(this.rawConnection)
                 } catch (err) {
-                    // Swallowed so the connection is still returned to the pool.
-                    // Clearing rawConnection only after the hook settles keeps a
-                    // concurrent release() on the hook path rather than letting it
-                    // re-pool the client while the cleanup is still in flight.
+                    // The client goes back to the pool either way, so a failed
+                    // cleanup is only logged.
                     this.connection.logger.log(
                         "warn",
                         `Postgres onRelease extension failed. ${err}`,
@@ -71,6 +65,9 @@ export class PostgresQueryRunnerExtension extends PostgresQueryRunner {
                 }
             }
 
+            // Cleared only after the hook settles. Clearing it first sends a
+            // concurrent release() down the early return, which re-pools the
+            // client while the cleanup is still in flight.
             this.rawConnection = undefined
         }
 
@@ -87,9 +84,7 @@ export class PostgresQueryRunnerExtension extends PostgresQueryRunner {
             try {
                 await registeredOptions.onConnect(this.rawConnection)
             } catch (err) {
-                // Never fail the checkout: the connection itself is usable.
-                // A hook that wants a failed setup to fail the request has to
-                // reject, and no consumer does today.
+                // The client is usable, only its session state is missing.
                 this.connection.logger.log(
                     "warn",
                     `Postgres onConnect extension failed. ${err}`,
