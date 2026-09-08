@@ -9,6 +9,7 @@ import { TableForeignKey } from "../../schema-builder/table/TableForeignKey"
 import { View } from "../../schema-builder/view/View"
 import { Query } from "../Query"
 import { AbstractSqliteDriver } from "./AbstractSqliteDriver"
+import { SqliteConnectionLease } from "./SqliteConnectionPool"
 import { ReadStream } from "../../platform/PlatformTools"
 import { TableIndexOptions } from "../../schema-builder/options/TableIndexOptions"
 import { TableUnique } from "../../schema-builder/table/TableUnique"
@@ -39,10 +40,11 @@ export abstract class AbstractSqliteQueryRunner
 
     protected transactionPromise: Promise<any> | null = null
 
-    // Hirebotics patch: this runner's claim on the single connection.
-    protected connectPromise?: Promise<any>
-    protected releaseConnectionLock?: () => void
-    protected isReleasing = false
+    // Hirebotics patch: this runner's lease on the single connection.
+    // It is the only handle on it, and it is taken once and never replaced,
+    // so a statement after this runner released, or after its wait for the
+    // connection timed out, cannot quietly take a fresh one.
+    protected lease?: SqliteConnectionLease
 
     // -------------------------------------------------------------------------
     // Constructor
@@ -60,25 +62,22 @@ export abstract class AbstractSqliteQueryRunner
      * Creates/uses database connection from the connection pool to perform further operations.
      * Returns obtained database connection.
      */
-    connect(): Promise<any> {
-        // Hirebotics patch: this runner holds the connection until release().
-        // Every path to sqlite awaits connect(), so acquire the lock here.
-        if (!this.connectPromise) {
-            this.connectPromise = this.acquireConnectionLock()
+    async connect(): Promise<any> {
+        // Hirebotics patch: this runner leases the connection until release().
+        // Every path to sqlite awaits connect(), so the lease is taken here
+        // and this is the only place that hands the connection out.
+        const pool = this.driver.connectionPool
+        if (!pool) {
+            // This driver did not opt in to leasing.
+            return this.driver.databaseConnection
         }
-        return this.connectPromise
-    }
-
-    private async acquireConnectionLock(): Promise<any> {
-        try {
-            this.releaseConnectionLock =
-                await this.driver.connectionLock?.acquire()
-        } catch (err) {
-            // Let the next statement try again rather than caching the failure.
-            this.connectPromise = undefined
-            throw err
+        if (this.isReleased) {
+            throw new QueryRunnerAlreadyReleasedError()
         }
-        return this.driver.databaseConnection
+        if (!this.lease) {
+            this.lease = pool.acquire()
+        }
+        return this.lease.getConnection()
     }
 
     /**
@@ -88,67 +87,25 @@ export abstract class AbstractSqliteQueryRunner
      * It can. A query runner owns a transaction, not a connection.
      */
     async release(): Promise<void> {
-        if (!this.driver.connectionLock) {
-            // This driver did not opt in to serialized runners.
+        if (!this.driver.connectionPool) {
+            // This driver did not opt in to leasing.
             // Upstream behaviour: clear memory and keep the runner reusable.
             this.loadedTables = []
             this.clearSqlMemory()
             return
         }
-        if (this.isReleased || this.isReleasing) {
+        if (this.isReleased) {
             return
         }
-        // Set before the rollback is awaited, so a statement racing release() is
-        // refused rather than committed in autocommit behind the rollback.
-        this.isReleasing = true
         try {
-            if (this.connectPromise) {
-                await this.rollbackAbandonedTransaction()
-            }
+            await this.lease?.release()
         } finally {
-            this.releaseConnectionLock?.()
-            this.releaseConnectionLock = undefined
-            this.connectPromise = undefined
+            // This runner ends released even if giving the lease back failed.
             this.isTransactionActive = false
             this.transactionDepth = 0
             this.isReleased = true
             this.loadedTables = []
             this.clearSqlMemory()
-        }
-    }
-
-    /**
-     * Rolls back whatever this runner left open.
-     *
-     * Always attempted, never gated on isTransactionActive.
-     * A caller that ran a raw BEGIN never sets that flag.
-     * Its transaction would then outlive the runner.
-     *
-     * There are three outcomes and they are not the same.
-     * Rolled back: warn, then hand the connection on.
-     * Nothing was open: hand it on, say nothing.
-     * Anything else: we no longer know what state the transaction is in.
-     * Refuse the connection in that case.
-     * Handing it on would let the next runner read the abandoned rows.
-     * Its BEGIN would also fail for as long as the process lives.
-     */
-    private async rollbackAbandonedTransaction(): Promise<void> {
-        let wasRolledBack: boolean
-        try {
-            wasRolledBack = await this.driver.rollback()
-        } catch (err) {
-            this.driver.connectionLock?.markUnusable(
-                new TypeORMError(
-                    `The sqlite connection was left with an abandoned transaction: the rollback on release failed. ${err}`,
-                ),
-            )
-            return
-        }
-        if (wasRolledBack) {
-            this.driver.connection.logger.log(
-                "warn",
-                `Query runner released with a transaction still open. Rolled it back.`,
-            )
         }
     }
 
@@ -1303,20 +1260,6 @@ export abstract class AbstractSqliteQueryRunner
     // -------------------------------------------------------------------------
     // Protected Methods
     // -------------------------------------------------------------------------
-
-    /**
-     * Hirebotics patch: refuses statements from a runner that is going away.
-     * Both flags belong to this runner, so no other runner can reset them.
-     * isReleased is only set once release() has finished.
-     * So the isReleasing half is what catches a statement racing release().
-     * Without it that statement runs after the connection has changed hands.
-     * It lands in the new owner's transaction and dies with that runner's rollback.
-     */
-    protected assertNotReleased(): void {
-        if (this.isReleased || this.isReleasing) {
-            throw new QueryRunnerAlreadyReleasedError()
-        }
-    }
 
     protected async loadViews(viewNames?: string[]): Promise<View[]> {
         const hasTable = await this.hasTable(this.getTypeormMetadataTableName())

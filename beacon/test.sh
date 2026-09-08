@@ -91,6 +91,7 @@ COVERAGE_DIR="${BEACON_DIR}/coverage"
 TEST_FILES=(
   build/compiled/test/functional/driver/abstract-sqlite/abstract-sqlite-query-runner-ownership.test.js
   build/compiled/test/functional/driver/abstract-sqlite/abstract-sqlite-begin-immediate.test.js
+  build/compiled/test/functional/driver/abstract-sqlite/abstract-sqlite-escape-query-parameters.test.js
   build/compiled/test/functional/driver/postgres/postgres-driver-extension.test.js
   build/compiled/test/functional/driver/postgres/connection-options.test.js
   build/compiled/test/functional/query-builder/insert/query-builder-insert.test.js
@@ -106,7 +107,7 @@ TEST_FILES=(
 # c8 maps compiled output back through source maps, so these name the
 # TypeScript sources rather than the files mocha loads.
 COVERED_FILES=(
-  src/driver/sqlite-abstract/SqliteConnectionLock.ts
+  src/driver/sqlite-abstract/SqliteConnectionPool.ts
   src/driver/sqlite-abstract/AbstractSqliteQueryRunner.ts
   src/driver/postgres/PostgresDriverExtension.ts
 )

@@ -1,4 +1,5 @@
 import { ConnectionIsNotSetError } from "../../error/ConnectionIsNotSetError"
+import { QueryRunnerAlreadyReleasedError } from "../../error/QueryRunnerAlreadyReleasedError"
 import { QueryFailedError } from "../../error/QueryFailedError"
 import { QueryResult } from "../../query-runner/QueryResult"
 import { Broadcaster } from "../../subscriber/Broadcaster"
@@ -52,8 +53,9 @@ export class SqliteQueryRunner extends AbstractSqliteQueryRunner {
         parameters?: any[],
         useStructuredResult = false,
     ): Promise<any> {
-        // Hirebotics patch: reject while release() is in flight.
-        this.assertNotReleased()
+        if (this.isReleased) {
+            throw new QueryRunnerAlreadyReleasedError()
+        }
 
         const connection = this.driver.connection
         const options = connection.options as SqliteConnectionOptions
@@ -69,14 +71,6 @@ export class SqliteQueryRunner extends AbstractSqliteQueryRunner {
         this.driver.connection.logger.logQuery(query, parameters, this)
         await broadcaster.broadcast("BeforeQuery", query, parameters)
 
-        // Hirebotics patch: reject while release() is in flight.
-        // The check at the top of this method ran before the awaits above.
-        // A BeforeQuery subscriber can hold a statement past this runner's release().
-        // The connection may have changed hands, and another runner now owns it.
-        // Running the statement would write inside that runner's transaction.
-        // Its rollback would then throw the write away.
-        this.assertNotReleased()
-
         const broadcasterResult = new BroadcasterResult()
 
         return new Promise(async (ok, fail) => {
@@ -87,6 +81,10 @@ export class SqliteQueryRunner extends AbstractSqliteQueryRunner {
                 const isUpdateQuery = query.startsWith("UPDATE ")
 
                 const execute = async () => {
+                    // Hirebotics patch: confirm the lease is still valid.
+                    // Analogous to checking AbortSignal.aborted before an operation.
+                    this.lease?.assertNotRevoked()
+
                     if (isInsertQuery || isDeleteQuery || isUpdateQuery) {
                         await databaseConnection.run(query, parameters, handler)
                     } else {

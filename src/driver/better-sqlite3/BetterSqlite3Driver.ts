@@ -53,8 +53,8 @@ export class BetterSqlite3Driver extends AbstractSqliteDriver {
      */
     async disconnect(): Promise<void> {
         this.queryRunner = undefined
-        // Hirebotics patch: fail anyone queued for a connection that is closing.
-        this.destroyConnectionLock()
+        // Hirebotics patch: revoke every lease on a closing connection.
+        this.closeConnectionPool()
         this.databaseConnection.close()
     }
 
@@ -137,8 +137,8 @@ export class BetterSqlite3Driver extends AbstractSqliteDriver {
      * Creates connection with the database.
      */
     protected async createDatabaseConnection() {
-        // Hirebotics patch: opts this driver into serialized query runners.
-        this.createConnectionLock()
+        // Hirebotics patch: opts this driver into leased query runners.
+        this.createConnectionPool()
 
         // not to create database directory if is in memory
         if (this.options.database !== ":memory:")

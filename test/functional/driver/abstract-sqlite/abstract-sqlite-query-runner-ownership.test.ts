@@ -1,6 +1,11 @@
 import "reflect-metadata"
 import { expect } from "chai"
-import { DataSource, EntitySubscriberInterface } from "../../../../src"
+import {
+    DataSource,
+    EntitySubscriberInterface,
+    QueryRunner,
+} from "../../../../src"
+import { TypeORMError } from "../../../../src/error/TypeORMError"
 import { QueryRunnerAlreadyReleasedError } from "../../../../src/error/QueryRunnerAlreadyReleasedError"
 import {
     closeTestingConnections,
@@ -469,6 +474,94 @@ describe("sqlite driver > query runner ownership", () => {
         )
     })
 
+    it("should not roll back the holder's transaction when a queued runner is released", () => {
+        return Promise.all(
+            connections.map(async (connection) => {
+                // A runner that is still waiting in line never touched the
+                // connection. Releasing it must leave the holder alone and must
+                // not consume the turn it was waiting for, or the connection is
+                // granted later with nobody left to give it back.
+                const holder = connection.createQueryRunner()
+                const queued = connection.createQueryRunner()
+                try {
+                    await holder.startTransaction()
+                    await holder.query(
+                        `INSERT INTO thing (name) VALUES ('holder')`,
+                    )
+
+                    // .then, not await: this statement has to stay in flight
+                    // across the release below.
+                    const waiting = queued.query("SELECT 1").then(
+                        () => "resolved",
+                        (err: Error) => err.constructor.name,
+                    )
+                    await queued.release()
+
+                    const held = await holder.query(`SELECT name FROM thing`)
+                    expect(held).to.eql([{ name: "holder" }])
+                    expect(await waiting).to.equal(
+                        QueryRunnerAlreadyReleasedError.name,
+                    )
+                    await holder.commitTransaction()
+                } finally {
+                    await queued.release()
+                    await holder.release()
+                }
+
+                // The turn the queued runner gave up must not have been spent.
+                const startedAt = Date.now()
+                await connection.query("SELECT 1")
+                expect(Date.now() - startedAt).to.be.lessThan(1000)
+
+                const names = (
+                    await connection.getRepository(Thing).find()
+                ).map((thing) => thing.name)
+                expect(names).to.eql(["holder"])
+            }),
+        )
+    })
+
+    it("should not take a fresh connection for a runner that was already released", () => {
+        return Promise.all(
+            connections.map(async (connection) => {
+                // connect() is the only route to the connection, so it is the
+                // one place that has to refuse a released runner. Handing one
+                // out would lease it to a runner nobody will release, and wedge
+                // the driver for the life of the process.
+                const connectOutcome = async (runner: QueryRunner) => {
+                    try {
+                        await runner.connect()
+                        return "resolved"
+                    } catch (err) {
+                        return (err as Error).constructor.name
+                    }
+                }
+
+                // A runner that used the connection keeps its revoked lease,
+                // and the lease refuses.
+                const used = connection.createQueryRunner()
+                await used.query("SELECT 1")
+                await used.release()
+                expect(await connectOutcome(used)).to.equal(
+                    QueryRunnerAlreadyReleasedError.name,
+                )
+
+                // A runner released without ever connecting has no lease to
+                // refuse for it, so only the released check stands between it
+                // and a connection it would never give back.
+                const unused = connection.createQueryRunner()
+                await unused.release()
+                expect(await connectOutcome(unused)).to.equal(
+                    QueryRunnerAlreadyReleasedError.name,
+                )
+
+                const startedAt = Date.now()
+                await connection.query("SELECT 1")
+                expect(Date.now() - startedAt).to.be.lessThan(1000)
+            }),
+        )
+    })
+
     it("should reject a queued runner when the DataSource is destroyed", () => {
         return Promise.all(
             connections.map(async (connection) => {
@@ -494,6 +587,32 @@ describe("sqlite driver > query runner ownership", () => {
                 expect(Date.now() - startedAt).to.be.lessThan(5000)
 
                 await connection.initialize()
+            }),
+        )
+    })
+
+    it("should refuse the holder's next statement after the DataSource is destroyed", () => {
+        return Promise.all(
+            connections.map(async (connection) => {
+                const holder = connection.createQueryRunner()
+                let outcome: unknown = "resolved"
+                try {
+                    await holder.startTransaction()
+                    await connection.destroy()
+
+                    // The handle is closed. A driver that drops its pool on
+                    // close falls back to handing out the raw connection, and
+                    // the holder then reaches a closed handle: better-sqlite3
+                    // raises a bare TypeError with no idea what happened.
+                    try {
+                        await holder.query("SELECT 1")
+                    } catch (err) {
+                        outcome = err
+                    }
+                } finally {
+                    await connection.initialize()
+                }
+                expect(outcome).to.be.instanceOf(TypeORMError)
             }),
         )
     })
@@ -720,7 +839,7 @@ describe("sqlite driver > query runner ownership > lease timeout", () => {
         )
     })
 
-    it("should retry acquisition on the next statement after a lease timeout", () => {
+    it("should fail fast on a runner whose wait for the connection already timed out", () => {
         return Promise.all(
             connections.map(async (connection) => {
                 const holder = connection.createQueryRunner()
@@ -736,12 +855,25 @@ describe("sqlite driver > query runner ownership > lease timeout", () => {
                     // not until its transaction commits.
                     await holder.release()
 
-                    // The failed acquisition must not be cached on the runner.
-                    await waiter.query("SELECT 1")
+                    // A runner takes one lease and never another, so this
+                    // reports the wait that already failed instead of starting
+                    // a second one. Waiting again would let one runner spend
+                    // the acquire deadline over and over, and no caller retries
+                    // a statement on a runner that already threw.
+                    const startedAt = Date.now()
+                    await waiter
+                        .query("SELECT 1")
+                        .should.be.rejectedWith(/Timed out after \d+ms/)
+                    expect(Date.now() - startedAt).to.be.lessThan(400)
                 } finally {
                     await waiter.release()
                     await holder.release()
                 }
+
+                // Only that runner is spent. The connection is free.
+                const startedAt = Date.now()
+                await connection.query("SELECT 1")
+                expect(Date.now() - startedAt).to.be.lessThan(400)
             }),
         )
     })
