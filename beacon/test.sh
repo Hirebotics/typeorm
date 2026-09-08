@@ -65,6 +65,22 @@ if [ -z "$(command -v pnpm)" ]; then
   exit 1
 fi
 
+# Switch to the node in .nvmrc in cwd so nobody has to remember to.
+# nvm is a shell function, not a program, so it must be sourced before use.
+# HOMEBREW_PREFIX is exported by brew shellenv.
+NVM_DIR="${NVM_DIR:-${HOME}/.nvm}"
+for nvm_script in "${NVM_DIR}/nvm.sh" "${HOMEBREW_PREFIX}/opt/nvm/nvm.sh"; do
+  if [ -s "${nvm_script}" ]; then
+    # nvm.sh returns non-zero on paths that are not failures, so -e is off here.
+    set +e
+    # shellcheck disable=SC1090
+    source "${nvm_script}" > /dev/null 2>&1
+    nvm use > /dev/null 2>&1
+    set -e
+    break
+  fi
+done
+
 # Read the required major from .nvmrc so this check cannot drift from it.
 # better-sqlite3@8.7.0 has no prebuilt binary for node 22+ and fails to build,
 # and the failure surfaces as a confusing native module error much later.
