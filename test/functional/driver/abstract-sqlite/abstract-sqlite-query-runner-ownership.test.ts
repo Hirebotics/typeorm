@@ -14,6 +14,7 @@ import {
 } from "../../../utils/test-utils"
 import { Thing } from "./entity/Thing"
 import {
+    captureExecutedSql,
     captureLog,
     captureSql,
     executeOutOfBand,
@@ -603,6 +604,155 @@ describe("sqlite driver > query runner ownership", () => {
         )
     })
 
+    it("should not interleave two runners' statements on the connection", () => {
+        return Promise.all(
+            connections.map(async (connection) => {
+                // The whole point of leasing, asserted on the statements that
+                // actually reached sqlite rather than on the rows they left.
+                // Isolation tests pass even if statements interleave, as long
+                // as the outcome happens to survive.
+                const runUnit = async (tag: string) => {
+                    const runner = connection.createQueryRunner()
+                    try {
+                        await runner.startTransaction()
+                        await runner.query(
+                            `INSERT INTO thing (name) VALUES ('${tag}-a')`,
+                        )
+                        await runner.query(
+                            `INSERT INTO thing (name) VALUES ('${tag}-b')`,
+                        )
+                        await runner.commitTransaction()
+                    } finally {
+                        await runner.release()
+                    }
+                }
+
+                const sql = captureExecutedSql(connection)
+                try {
+                    await Promise.all([
+                        runUnit("u1"),
+                        runUnit("u2"),
+                        runUnit("u3"),
+                    ])
+                } finally {
+                    sql.restore()
+                }
+
+                const relevant = sql.getStatements().filter((statement) => {
+                    return /^(BEGIN IMMEDIATE|COMMIT|INSERT INTO thing)/.test(
+                        statement,
+                    )
+                })
+                expect(relevant.length).to.equal(12)
+
+                // Each unit must appear as one unbroken BEGIN..COMMIT block.
+                for (let start = 0; start < relevant.length; start += 4) {
+                    const [begin, first, second, commit] = relevant.slice(
+                        start,
+                        start + 4,
+                    )
+                    expect(begin).to.equal("BEGIN IMMEDIATE")
+                    expect(commit).to.equal("COMMIT")
+                    const tag = /'(u\d)-a'/.exec(first)
+                    expect(tag, `no tag in ${first}`).to.not.equal(null)
+                    expect(second).to.contain(`'${tag![1]}-b'`)
+                }
+            }),
+        )
+    })
+
+    it("should roll back a transaction whose COMMIT never reached sqlite", () => {
+        return Promise.all(
+            connections.map(async (connection) => {
+                // A failed COMMIT leaves isTransactionActive true and the
+                // transaction open in sqlite. Release has to roll it back, or
+                // the next runner reads rows the caller was told were lost and
+                // its own BEGIN fails for as long as the process lives.
+                const log = captureLog(connection)
+                connection.subscribers.push({
+                    beforeQuery(event: { query: string }) {
+                        if (event.query === "COMMIT") {
+                            throw new Error("subscriber commit failure")
+                        }
+                        return undefined
+                    },
+                } as never)
+
+                const holder = connection.createQueryRunner()
+                const next = connection.createQueryRunner()
+                let commitFailure = "no error"
+                try {
+                    await holder.startTransaction()
+                    await holder.query(
+                        `INSERT INTO thing (name) VALUES ('uncommitted')`,
+                    )
+                    try {
+                        await holder.commitTransaction()
+                    } catch (err) {
+                        commitFailure = (err as Error).message
+                    }
+                    expect(commitFailure).to.contain(
+                        "subscriber commit failure",
+                    )
+                    expect(holder.isTransactionActive).to.equal(true)
+
+                    connection.subscribers.length = 0
+                    await holder.release()
+
+                    expect(
+                        log.getAbandonedTransactionRollbackCount(),
+                    ).to.be.greaterThan(0)
+                    expect(await next.query(`SELECT name FROM thing`)).to.eql(
+                        [],
+                    )
+                    // A transaction left open fails this with SQLITE_ERROR.
+                    await next.startTransaction()
+                    await next.commitTransaction()
+                } finally {
+                    connection.subscribers.length = 0
+                    log.restore()
+                    await next.release()
+                    await holder.release()
+                }
+            }),
+        )
+    })
+
+    it("should roll back nested savepoints abandoned by release", () => {
+        return Promise.all(
+            connections.map(async (connection) => {
+                // Releasing at savepoint depth 2 must undo the outer
+                // transaction too, and must leave the runner reporting no
+                // transaction rather than the depth it abandoned.
+                const holder = connection.createQueryRunner()
+                const next = connection.createQueryRunner()
+                try {
+                    await holder.startTransaction()
+                    await holder.query(
+                        `INSERT INTO thing (name) VALUES ('outer')`,
+                    )
+                    await holder.startTransaction()
+                    await holder.query(
+                        `INSERT INTO thing (name) VALUES ('inner')`,
+                    )
+                    expect(holder.isTransactionActive).to.equal(true)
+
+                    await holder.release()
+                    expect(holder.isTransactionActive).to.equal(false)
+
+                    expect(await next.query(`SELECT name FROM thing`)).to.eql(
+                        [],
+                    )
+                    await next.startTransaction()
+                    await next.commitTransaction()
+                } finally {
+                    await next.release()
+                    await holder.release()
+                }
+            }),
+        )
+    })
+
     it("should refuse a statement that races the release of a never-used runner", () => {
         return Promise.all(
             connections.map(async (connection) => {
@@ -895,6 +1045,56 @@ describe("sqlite driver > query runner ownership > lease timeout", () => {
         )
     })
 
+    it("should keep the queue in order when a waiting runner is released", () => {
+        return Promise.all(
+            connections.map(async (connection) => {
+                // query() takes its place in line synchronously, so these
+                // queue in call order. Releasing the middle one must not move
+                // the others or consume the turn it gives up.
+                const holder = connection.createQueryRunner()
+                const first = connection.createQueryRunner()
+                const abandoned = connection.createQueryRunner()
+                const last = connection.createQueryRunner()
+                try {
+                    await holder.startTransaction()
+
+                    const order: string[] = []
+                    // .then, not await: all three have to be queued at once.
+                    const firstDone = first.query("SELECT 1").then(() => {
+                        order.push("first")
+                    })
+                    const abandonedDone = abandoned.query("SELECT 2").then(
+                        () => {
+                            order.push("abandoned")
+                        },
+                        () => {
+                            order.push("abandoned-refused")
+                        },
+                    )
+                    const lastDone = last.query("SELECT 3").then(() => {
+                        order.push("last")
+                    })
+
+                    await abandoned.release()
+                    await abandonedDone
+                    await holder.rollbackTransaction()
+                    await holder.release()
+
+                    await firstDone
+                    await first.release()
+                    await lastDone
+
+                    expect(order).to.eql(["abandoned-refused", "first", "last"])
+                } finally {
+                    await last.release()
+                    await abandoned.release()
+                    await first.release()
+                    await holder.release()
+                }
+            }),
+        )
+    })
+
     it("should fail fast on a runner whose wait for the connection already timed out", () => {
         return Promise.all(
             connections.map(async (connection) => {
@@ -1042,5 +1242,53 @@ describe("sqlite driver > query runner ownership > unusable connection", () => {
                 expect(message).to.contain("database is locked")
             }),
         )
+    })
+})
+
+describe("sqlite driver > query runner ownership > driver without leasing", () => {
+    let connection: DataSource
+    before(async () => {
+        // sqljs is one of the six sqlite drivers the fork leaves alone. It is
+        // the only place the unleased branches of connect() and release() run,
+        // and the PR claims those drivers are untouched.
+        connection = new DataSource({ type: "sqljs", autoSave: false })
+        await connection.initialize()
+        await connection.query(`CREATE TABLE item (name TEXT)`)
+    })
+    after(() => {
+        return connection.destroy()
+    })
+
+    it("should keep a released runner usable, as upstream does", async () => {
+        const runner = connection.createQueryRunner()
+        await runner.startTransaction()
+        await runner.query(`INSERT INTO item (name) VALUES ('kept')`)
+        await runner.commitTransaction()
+
+        // Upstream's sqlite release() is a memory reset, not a lifecycle end.
+        // A runner is reusable afterwards and never reports itself released.
+        await runner.release()
+        expect(runner.isReleased).to.equal(false)
+
+        expect(await runner.query(`SELECT name FROM item`)).to.eql([
+            { name: "kept" },
+        ])
+        await runner.connect()
+        await runner.release()
+    })
+
+    it("should let two runners share the connection, as upstream does", async () => {
+        // Without leasing there is nothing to serialize: a second runner is
+        // handed the same connection with no wait and no deadline.
+        const first = connection.createQueryRunner()
+        const second = connection.createQueryRunner()
+        try {
+            const startedAt = Date.now()
+            expect(await first.connect()).to.equal(await second.connect())
+            expect(Date.now() - startedAt).to.be.lessThan(1000)
+        } finally {
+            await second.release()
+            await first.release()
+        }
     })
 })
