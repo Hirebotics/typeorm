@@ -22,7 +22,7 @@ import { View } from "../../schema-builder/view/View"
 import { TableForeignKey } from "../../schema-builder/table/TableForeignKey"
 import { InstanceChecker } from "../../util/InstanceChecker"
 import { UpsertType } from "../types/UpsertType"
-import { SqliteConnectionLock } from "./SqliteConnectionLock"
+import { SqliteConnectionPool } from "./SqliteConnectionPool"
 
 type DatabasesMap = Record<
     string,
@@ -55,7 +55,7 @@ export abstract class AbstractSqliteDriver implements Driver {
      * Hirebotics patch: serializes query runners against the single connection.
      * Only the drivers Beacon uses create one, so the other sqlite drivers are unaffected.
      */
-    connectionLock?: SqliteConnectionLock
+    connectionPool?: SqliteConnectionPool
 
     /**
      * Real database connection with sqlite database.
@@ -291,7 +291,6 @@ export abstract class AbstractSqliteDriver implements Driver {
     async disconnect(): Promise<void> {
         return new Promise<void>((ok, fail) => {
             this.queryRunner = undefined
-            this.destroyConnectionLock()
             this.databaseConnection.close((err: any) =>
                 err ? fail(err) : ok(),
             )
@@ -957,22 +956,38 @@ export abstract class AbstractSqliteDriver implements Driver {
     }
 
     /**
-     * Hirebotics patch: opts this driver into serialized query runners.
+     * Hirebotics patch: opts this driver into leased query runners.
      * Called by the drivers Beacon uses; the rest keep upstream's behaviour.
      */
-    protected createConnectionLock(): void {
+    protected createConnectionPool(): void {
         const { connectionLeaseTimeout } = this.options as {
             connectionLeaseTimeout?: number
         }
-        this.connectionLock = new SqliteConnectionLock(connectionLeaseTimeout)
+        this.connectionPool = new SqliteConnectionPool({
+            // Read on grant, not now.
+            // The handle does not exist until createDatabaseConnection() returns.
+            getConnection: () => {
+                return this.databaseConnection
+            },
+            rollback: () => {
+                return this.rollback()
+            },
+            logger: this.connection.logger,
+            acquireTimeoutMs: connectionLeaseTimeout,
+        })
     }
 
     /**
-     * Hirebotics patch: fails everyone queued for a connection that is closing.
-     * Without it a waiter is later granted a closed handle.
+     * Hirebotics patch: revokes every lease on a connection that is closing.
+     * Without it a lease outlives the handle it was granted and the next
+     * statement reaches a closed connection.
+     *
+     * The closed pool is kept, not dropped.
+     * Dropping it would put this driver back on the unleased path, where
+     * connect() hands out the raw connection field -- by then a closed handle.
+     * connect() replaces the pool, so a re-initialized DataSource gets a fresh one.
      */
-    protected destroyConnectionLock(): void {
-        this.connectionLock?.destroy()
-        this.connectionLock = undefined
+    protected closeConnectionPool(): void {
+        this.connectionPool?.close()
     }
 }

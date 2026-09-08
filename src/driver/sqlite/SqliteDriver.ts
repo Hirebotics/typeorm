@@ -53,9 +53,9 @@ export class SqliteDriver extends AbstractSqliteDriver {
     async disconnect(): Promise<void> {
         return new Promise<void>((ok, fail) => {
             this.queryRunner = undefined
-            // Hirebotics patch: fail anyone queued for a connection that is closing.
-            this.destroyConnectionLock()
-            this.databaseConnection.close((err: any) =>
+            // Hirebotics patch: revoke every lease on a closing connection.
+            this.closeConnectionPool()
+            this.databaseConnection.close((err: Error) =>
                 err ? fail(err) : ok(),
             )
         })
@@ -155,8 +155,8 @@ export class SqliteDriver extends AbstractSqliteDriver {
      * Creates connection with the database.
      */
     protected async createDatabaseConnection() {
-        // Hirebotics patch: opts this driver into serialized query runners.
-        this.createConnectionLock()
+        // Hirebotics patch: opts this driver into leased query runners.
+        this.createConnectionPool()
 
         if (
             this.options.flags === undefined ||

@@ -24,14 +24,14 @@ then tears Postgres down and restores your `ormconfig.json`, even on failure or 
 | **sqlite** and **better-sqlite3** | A query runner per caller, each holding the one connection from its first statement until `release()`, so concurrent units of work cannot land in a single transaction. Plus `BEGIN IMMEDIATE`. |
 | **postgres**                      | `onConnect` / `onRelease` pool hooks via `extendPostgresDriver()`. Beacon uses these for per-request row-level security (`SET app.current_tenant`).                                             |
 
-The sqlite work is one fork-owned file, `src/driver/sqlite-abstract/SqliteConnectionLock.ts`,
-plus edits to four upstream files. Every edit carries a `Hirebotics patch:` comment.
+The sqlite work is one fork-owned file, `src/driver/sqlite-abstract/SqliteConnectionPool.ts`,
+plus edits to eight upstream files. Every edit carries a `Hirebotics patch:` comment.
 
-### Why there is a lock at all
+### Why the connection is leased at all
 
 sqlite supports many connections to one file; TypeORM's sqlite driver just holds one.
 The connection stays single because **each connection to `:memory:` is a separate database**,
-and consumers run `:memory:` in tests. That is what makes the lock necessary, not any limit in sqlite.
+and consumers run `:memory:` in tests. That is what makes leasing necessary, not any limit in sqlite.
 
 sqlite's own busy handler cannot do this job. Two runners on one connection do not contend for a
 file lock — the second `BEGIN` fails `SQLITE_ERROR`, not `SQLITE_BUSY` — and a busy wait would
@@ -50,7 +50,7 @@ database, because the connection's snapshot is permanently stale.
 That is why BEACON-1491's retry fix did not stop the alerts, and why BEACON-1684 saw a
 multi-second freeze: ten retries of an error that cannot clear.
 
-Once `BEGIN IMMEDIATE` removes that error class and the lock removes same-process contention,
+Once `BEGIN IMMEDIATE` removes that error class and leasing removes same-process contention,
 the only `SQLITE_BUSY` left comes from PowerSync's own connection, and sqlite's `busy_timeout`
 handles that correctly in C.
 
