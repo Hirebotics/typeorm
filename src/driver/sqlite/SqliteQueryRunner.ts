@@ -52,7 +52,7 @@ export class SqliteQueryRunner extends AbstractSqliteQueryRunner {
         parameters?: any[],
         useStructuredResult = false,
     ): Promise<any> {
-        // Hirebotics patch: also refuses while release() is in flight.
+        // Hirebotics patch: reject while release() is in flight.
         this.assertNotReleased()
 
         const connection = this.driver.connection
@@ -68,6 +68,14 @@ export class SqliteQueryRunner extends AbstractSqliteQueryRunner {
 
         this.driver.connection.logger.logQuery(query, parameters, this)
         await broadcaster.broadcast("BeforeQuery", query, parameters)
+
+        // Hirebotics patch: reject while release() is in flight.
+        // The check at the top of this method ran before the awaits above.
+        // A BeforeQuery subscriber can hold a statement past this runner's release().
+        // The connection may have changed hands, and another runner now owns it.
+        // Running the statement would write inside that runner's transaction.
+        // Its rollback would then throw the write away.
+        this.assertNotReleased()
 
         const broadcasterResult = new BroadcasterResult()
 

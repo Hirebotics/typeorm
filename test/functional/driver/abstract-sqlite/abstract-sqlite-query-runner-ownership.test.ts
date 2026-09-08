@@ -520,6 +520,110 @@ describe("sqlite driver > query runner ownership", () => {
         )
     })
 
+    it("should refuse a statement held past release by a BeforeQuery subscriber", () => {
+        return Promise.all(
+            connections.map(async (connection) => {
+                // query() checks the runner once, at the top, before its awaits.
+                // A subscriber can hold a statement until after release().
+                // Without a second check it then runs in the next runner's transaction.
+                const sql = `INSERT INTO thing (name) VALUES ('late')`
+                let openGate = () => {}
+                let reportEntered = () => {}
+                const gate = new Promise<void>((ok) => {
+                    openGate = ok
+                })
+                const entered = new Promise<void>((ok) => {
+                    reportEntered = ok
+                })
+                connection.subscribers.push({
+                    beforeQuery(event: { query: string }) {
+                        if (event.query === sql) {
+                            reportEntered()
+                            return gate
+                        }
+                        return undefined
+                    },
+                } as never)
+
+                const holder = connection.createQueryRunner()
+                const next = connection.createQueryRunner()
+                try {
+                    await holder.startTransaction()
+                    const held = holder.query(sql).then(
+                        () => "resolved",
+                        (err: Error) => err.constructor.name,
+                    )
+                    await entered
+
+                    await holder.release()
+                    await next.startTransaction()
+                    openGate()
+
+                    expect(await held).to.equal(
+                        QueryRunnerAlreadyReleasedError.name,
+                    )
+                    const seenByNext = await next.query(
+                        `SELECT name FROM thing`,
+                    )
+                    expect(seenByNext).to.eql([])
+                    await next.rollbackTransaction()
+                } finally {
+                    openGate()
+                    connection.subscribers.length = 0
+                    await next.release()
+                    await holder.release()
+                }
+
+                const names = (
+                    await connection.getRepository(Thing).find()
+                ).map((thing) => thing.name)
+                expect(names).to.eql([])
+            }),
+        )
+    })
+
+    it("should not hand on a connection whose release rollback could not be delivered", () => {
+        return Promise.all(
+            connections.map(async (connection) => {
+                // A subscriber can reject ROLLBACK.
+                // That used to be swallowed, and the lock was freed anyway.
+                // The next runner then read the abandoned row.
+                // Its BEGIN failed from then on.
+                // The cleanup no longer goes through query(), so it still lands.
+                const holder = connection.createQueryRunner()
+                const next = connection.createQueryRunner()
+                try {
+                    await holder.startTransaction()
+                    await holder.query(
+                        `INSERT INTO thing (name) VALUES ('abandoned')`,
+                    )
+                    connection.subscribers.push({
+                        beforeQuery(event: { query: string }) {
+                            if (event.query === "ROLLBACK") {
+                                throw new Error("subscriber rollback failure")
+                            }
+                            return undefined
+                        },
+                    } as never)
+
+                    await holder.release()
+                    connection.subscribers.length = 0
+
+                    expect(await next.query(`SELECT name FROM thing`)).to.eql(
+                        [],
+                    )
+                    // A transaction left open fails this with SQLITE_ERROR.
+                    await next.startTransaction()
+                    await next.rollbackTransaction()
+                } finally {
+                    connection.subscribers.length = 0
+                    await next.release()
+                    await holder.release()
+                }
+            }),
+        )
+    })
+
     it("should not share the lease between data sources", async () => {
         // A regression to one module-global lease would serialize unrelated databases.
         // It can deadlock an app coordinating two of them.
@@ -638,6 +742,116 @@ describe("sqlite driver > query runner ownership > lease timeout", () => {
                     await waiter.release()
                     await holder.release()
                 }
+            }),
+        )
+    })
+})
+
+describe("sqlite driver > query runner ownership > result cache", () => {
+    let connections: DataSource[]
+    before(async () => {
+        connections = await createTestingConnections({
+            entities: TEST_ENTITIES,
+            enabledDrivers: SQLITE_DRIVERS,
+            cache: true,
+            driverSpecific: { connectionLeaseTimeout: 500 },
+        })
+        expectBothSqliteDrivers(connections)
+    })
+    beforeEach(() => {
+        return reloadTestingDatabases(connections)
+    })
+    after(() => {
+        return closeTestingConnections(connections)
+    })
+
+    it("should free the connection after queryResultCache.clear()", () => {
+        return Promise.all(
+            connections.map(async (connection) => {
+                // clear() makes its own query runner when the caller passes none.
+                // It has to release it.
+                // Forgetting left nothing for any later query to use.
+                await connection.queryResultCache!.clear(undefined as never)
+
+                const startedAt = Date.now()
+                expect(await connection.query("SELECT 1 AS value")).to.eql([
+                    { value: 1 },
+                ])
+                expect(Date.now() - startedAt).to.be.lessThan(500)
+            }),
+        )
+    })
+})
+
+describe("sqlite driver > query runner ownership > unusable connection", () => {
+    let connections: DataSource[]
+    // Its own connections: refusing one is permanent for that DataSource, so this
+    // test cannot share a fixture with the others.
+    before(async () => {
+        connections = await createTestingConnections({
+            entities: TEST_ENTITIES,
+            enabledDrivers: SQLITE_DRIVERS,
+            driverSpecific: { connectionLeaseTimeout: 500 },
+        })
+        expectBothSqliteDrivers(connections)
+        await reloadTestingDatabases(connections)
+    })
+    after(() => {
+        return closeTestingConnections(connections)
+    })
+
+    it("should refuse the connection when the rollback cannot be delivered", () => {
+        return Promise.all(
+            connections.map(async (connection) => {
+                // The rollback runs straight on the connection, so almost nothing can
+                // stop it. If sqlite itself refuses, we no longer know whether a
+                // transaction is open.
+                // Handing that connection on is worse than failing loudly.
+                // Each driver is broken the way its own library reports failure.
+                const handle = (
+                    connection.driver as unknown as {
+                        databaseConnection: Record<string, unknown>
+                    }
+                ).databaseConnection
+                const busy = Object.assign(new Error("database is locked"), {
+                    code: "SQLITE_BUSY",
+                })
+                const isNodeSqlite = connection.options.type === "sqlite"
+                const brokenMethod = isNodeSqlite ? "run" : "exec"
+                const realMethod = handle[brokenMethod]
+
+                const holder = connection.createQueryRunner()
+                try {
+                    await holder.startTransaction()
+                    handle[brokenMethod] = (
+                        sql: string,
+                        callback?: (err: unknown) => void,
+                    ) => {
+                        if (sql !== "ROLLBACK") {
+                            return (
+                                realMethod as (...args: unknown[]) => unknown
+                            ).call(handle, sql, callback)
+                        }
+                        if (callback) {
+                            callback(busy)
+                            return undefined
+                        }
+                        throw busy
+                    }
+                    await holder.release()
+                } finally {
+                    handle[brokenMethod] = realMethod
+                }
+
+                const next = connection.createQueryRunner()
+                let message = "no error"
+                try {
+                    await next.query(`SELECT name FROM thing`)
+                } catch (err) {
+                    message = (err as Error).message
+                }
+                expect(message).to.contain("abandoned transaction")
+                expect(message).to.contain("database is locked")
             }),
         )
     })

@@ -81,6 +81,9 @@ COMPOSE=(docker compose -f "${BEACON_DIR}/docker-compose.yml")
 PG_CONTAINER="beacon-typeorm-postgres"
 ORMCONFIG="${ROOT_DIR}/ormconfig.json"
 ORMCONFIG_BACKUP="${ROOT_DIR}/ormconfig.json.beacon-bak"
+
+# Set once the swap has actually happened, so cleanup knows the config is ours.
+DID_SWAP_ORMCONFIG="false"
 COVERAGE_DIR="${BEACON_DIR}/coverage"
 
 # The tests the Beacon patches own, plus upstream suites that exercise the
@@ -115,11 +118,16 @@ cleanup() {
   echo "tearing down postgres"
   "${COMPOSE[@]}" down -v > /dev/null 2>&1 || true
 
-  if [ -f "${ORMCONFIG_BACKUP}" ]; then
-    mv -f "${ORMCONFIG_BACKUP}" "${ORMCONFIG}"
-    echo "restored your previous ormconfig.json"
-  else
-    rm -f "${ORMCONFIG}"
+  # Only touch ormconfig.json if we actually swapped it.
+  # The trap is registered before the swap so Docker is always torn down.
+  # Without this guard an install failure deletes a config we never swapped.
+  if [ "${DID_SWAP_ORMCONFIG}" == "true" ]; then
+    if [ -f "${ORMCONFIG_BACKUP}" ]; then
+      mv -f "${ORMCONFIG_BACKUP}" "${ORMCONFIG}"
+      echo "restored your previous ormconfig.json"
+    else
+      rm -f "${ORMCONFIG}"
+    fi
   fi
 
   exit "${code}"
@@ -160,6 +168,7 @@ use_beacon_ormconfig() {
   fi
 
   cp "${BEACON_DIR}/ormconfig.beacon.json" "${ORMCONFIG}"
+  DID_SWAP_ORMCONFIG="true"
 }
 
 # Starts Postgres and blocks until it accepts connections.

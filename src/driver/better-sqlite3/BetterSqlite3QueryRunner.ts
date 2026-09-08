@@ -81,7 +81,7 @@ export class BetterSqlite3QueryRunner extends AbstractSqliteQueryRunner {
         parameters: any[] = [],
         useStructuredResult = false,
     ): Promise<any> {
-        // Hirebotics patch: also refuses while release() is in flight.
+        // Hirebotics patch: reject while release() is in flight.
         this.assertNotReleased()
 
         const connection = this.driver.connection
@@ -97,6 +97,14 @@ export class BetterSqlite3QueryRunner extends AbstractSqliteQueryRunner {
         const queryStartTime = Date.now()
 
         const stmt = await this.getStmt(query)
+
+        // Hirebotics patch: reject while release() is in flight.
+        // The check at the top of this method ran before the awaits above.
+        // A BeforeQuery subscriber can hold a statement past this runner's release().
+        // The connection may have changed hands, and another runner now owns it.
+        // Running the statement would write inside that runner's transaction.
+        // Its rollback would then throw the write away.
+        this.assertNotReleased()
 
         try {
             const result = new QueryResult()

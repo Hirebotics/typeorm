@@ -279,17 +279,6 @@ export abstract class AbstractSqliteDriver implements Driver {
     }
 
     /**
-     * Hirebotics patch: opts this driver into serialized query runners.
-     * Called by the drivers Beacon uses; the rest keep upstream's behaviour.
-     */
-    protected createConnectionLock(): void {
-        const { connectionLeaseTimeout } = this.options as {
-            connectionLeaseTimeout?: number
-        }
-        this.connectionLock = new SqliteConnectionLock(connectionLeaseTimeout)
-    }
-
-    /**
      * Makes any action after connection (e.g. create extensions in Postgres driver).
      */
     afterConnect(): Promise<void> {
@@ -310,12 +299,21 @@ export abstract class AbstractSqliteDriver implements Driver {
     }
 
     /**
-     * Hirebotics patch: fails everyone queued for a connection that is closing.
-     * Without it a waiter is later granted a closed handle.
+     * Hirebotics patch: runs ROLLBACK straight on the connection.
+     *
+     * No subscribers, no logging, no transaction bookkeeping.
+     * Going through QueryRunner.query() would let a BeforeQuery subscriber throw.
+     * The rollback would then never reach sqlite.
+     * Each driver implements it against its own sqlite library.
+     *
+     * Returns true when a transaction was rolled back.
+     * Returns false when there was nothing to roll back.
+     * Rejects only when neither of those could be established.
      */
-    protected destroyConnectionLock(): void {
-        this.connectionLock?.destroy()
-        this.connectionLock = undefined
+    async rollback(): Promise<boolean> {
+        throw new TypeORMError(
+            `${this.constructor.name} does not implement rollback().`,
+        )
     }
 
     hasAttachedDatabases(): boolean {
@@ -956,5 +954,25 @@ export abstract class AbstractSqliteDriver implements Driver {
      */
     protected loadDependencies(): void {
         // dependencies have to be loaded in the specific driver
+    }
+
+    /**
+     * Hirebotics patch: opts this driver into serialized query runners.
+     * Called by the drivers Beacon uses; the rest keep upstream's behaviour.
+     */
+    protected createConnectionLock(): void {
+        const { connectionLeaseTimeout } = this.options as {
+            connectionLeaseTimeout?: number
+        }
+        this.connectionLock = new SqliteConnectionLock(connectionLeaseTimeout)
+    }
+
+    /**
+     * Hirebotics patch: fails everyone queued for a connection that is closing.
+     * Without it a waiter is later granted a closed handle.
+     */
+    protected destroyConnectionLock(): void {
+        this.connectionLock?.destroy()
+        this.connectionLock = undefined
     }
 }

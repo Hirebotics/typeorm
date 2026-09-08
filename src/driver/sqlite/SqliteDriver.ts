@@ -71,6 +71,33 @@ export class SqliteDriver extends AbstractSqliteDriver {
         return new SqliteQueryRunner(this)
     }
 
+    /**
+     * Hirebotics patch: see AbstractSqliteDriver.rollback().
+     */
+    async rollback(): Promise<boolean> {
+        const databaseConnection = this.databaseConnection
+        return new Promise<boolean>((ok, fail) => {
+            databaseConnection.run(
+                "ROLLBACK",
+                (err: { code?: string } | null) => {
+                    if (!err) {
+                        ok(true)
+                        return
+                    }
+                    // node-sqlite3 exposes no way to ask whether a transaction is open.
+                    // The error code is the only signal.
+                    // A bare ROLLBACK raises SQLITE_ERROR when there is nothing to roll back.
+                    // A real failure raises something else, such as SQLITE_BUSY.
+                    if (err.code === "SQLITE_ERROR") {
+                        ok(false)
+                        return
+                    }
+                    fail(err)
+                },
+            )
+        })
+    }
+
     normalizeType(column: {
         type?: ColumnType
         length?: number | string
