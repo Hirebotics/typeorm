@@ -97,16 +97,18 @@ export abstract class AbstractSqliteQueryRunner
         if (this.isReleased) {
             return
         }
-        try {
-            await this.lease?.release()
-        } finally {
-            // This runner ends released even if giving the lease back failed.
-            this.isTransactionActive = false
-            this.transactionDepth = 0
-            this.isReleased = true
-            this.loadedTables = []
-            this.clearSqlMemory()
-        }
+
+        // Marked released before any async boundaries, and before the lease is released.
+        // It signals a release is in progress to mitigate race conditions until released.
+        this.isReleased = true
+        this.isTransactionActive = false
+        this.transactionDepth = 0
+        this.loadedTables = []
+        this.clearSqlMemory()
+
+        // The lease knows whether this runner ever got its turn, so a runner
+        // still waiting in line cannot roll back the holder's transaction.
+        await this.lease?.release()
     }
 
     /**
