@@ -68,6 +68,18 @@ export class BetterSqlite3Driver extends AbstractSqliteDriver {
         return new BetterSqlite3QueryRunner(this)
     }
 
+    /**
+     * Hirebotics patch: see AbstractSqliteDriver.rollback().
+     */
+    async rollback(): Promise<boolean> {
+        // inTransaction is sqlite3_get_autocommit(), so this needs no error handling.
+        if (!this.databaseConnection.inTransaction) {
+            return false
+        }
+        this.databaseConnection.exec("ROLLBACK")
+        return true
+    }
+
     normalizeType(column: {
         type?: ColumnType
         length?: number | string

@@ -30,6 +30,14 @@ export class SqliteConnectionLock {
     private isHeld = false
     private waiters: SqliteLockWaiter[] = []
 
+    /**
+     * Set when a release left the connection in an unknown transaction state.
+     * The next runner would otherwise read the abandoned rows.
+     * Its BEGIN would also fail for as long as the process lives.
+     * Neither of those says why, so we fail the acquire with a reason instead.
+     */
+    private unusableReason: Error | undefined
+
     constructor(private acquireTimeoutMs = DEFAULT_ACQUIRE_TIMEOUT_MS) {}
 
     /**
@@ -38,6 +46,9 @@ export class SqliteConnectionLock {
      * release a lock it does not hold or release the same one twice.
      */
     async acquire(): Promise<() => void> {
+        if (this.unusableReason) {
+            throw this.unusableReason
+        }
         if (this.isHeld) {
             await this.waitInQueue()
         }
@@ -50,6 +61,19 @@ export class SqliteConnectionLock {
             }
             isReleased = true
             this.grantToNextWaiter()
+        }
+    }
+
+    /**
+     * Refuses this connection from now on.
+     * Everyone already queued fails, and so does everyone who asks later.
+     */
+    markUnusable(reason: Error): void {
+        this.unusableReason = reason
+        const queued = this.waiters
+        this.waiters = []
+        for (const waiter of queued) {
+            waiter.reject(reason)
         }
     }
 

@@ -289,9 +289,18 @@ export class DbQueryResultCache implements QueryResultCache {
      * Clears everything stored in the cache.
      */
     async clear(queryRunner: QueryRunner): Promise<void> {
-        return this.getQueryRunner(queryRunner).clearTable(
-            this.queryResultCacheTable,
-        )
+        // Hirebotics patch: if we make our own query runner, we have to release it.
+        // On sqlite a query runner holds the one and only connection until it is
+        // released, so forgetting leaves nothing for the next query to use.
+        const isOwnQueryRunner = !queryRunner
+        const runner = this.getQueryRunner(queryRunner)
+        try {
+            await runner.clearTable(this.queryResultCacheTable)
+        } finally {
+            if (isOwnQueryRunner) {
+                await runner.release()
+            }
+        }
     }
 
     /**
