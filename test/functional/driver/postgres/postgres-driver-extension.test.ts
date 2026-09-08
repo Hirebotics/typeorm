@@ -154,8 +154,10 @@ describe("postgres driver > connection lifecycle hooks", () => {
                 // A second release() must stay on the hook path. If it reaches
                 // super.release() first, the client is re-pooled while the cleanup
                 // is in flight and the next borrower inherits this session's state.
+                let cleanupCount = 0
                 extendPostgresDriver({
                     onRelease: async () => {
+                        cleanupCount += 1
                         await new Promise((ok) => {
                             setTimeout(ok, 100)
                         })
@@ -182,6 +184,10 @@ describe("postgres driver > connection lifecycle hooks", () => {
 
                 expect(isReleasedDuringCleanup).to.equal(false)
                 expect(queryRunner.isReleased).to.equal(true)
+                // The exact count is what pins single-flight. Both isReleased
+                // assertions above still pass on an implementation that runs the
+                // cleanup twice, one per release() call.
+                expect(cleanupCount).to.equal(1)
             }),
         ))
 
