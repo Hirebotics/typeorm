@@ -208,9 +208,6 @@ export function captureLog(connection: DataSource) {
     }
 
     return {
-        getRetryCount: () => {
-            return countMessagesMatching(/SQLITE_BUSY, retrying/)
-        },
         getAbandonedTransactionRollbackCount: () => {
             return countMessagesMatching(
                 /released with a transaction still open/,
@@ -250,6 +247,36 @@ export function captureSql(connection: DataSource) {
         },
         restore: () => {
             logger.logQuery = original
+        },
+    }
+}
+
+/**
+ * Records statements in the order sqlite actually ran them.
+ *
+ * logQuery cannot be used for this. better-sqlite3 logs before the runner has
+ * the connection, so a queued runner's statement is logged ahead of statements
+ * that run before it. afterQuery fires once the statement has run.
+ */
+export function captureExecutedSql(connection: DataSource) {
+    const statements: string[] = []
+    const subscriber = {
+        afterQuery(event: { query: string }) {
+            statements.push(event.query)
+            return undefined
+        },
+    }
+    connection.subscribers.push(subscriber as never)
+
+    return {
+        getStatements: () => {
+            return [...statements]
+        },
+        restore: () => {
+            const index = connection.subscribers.indexOf(subscriber as never)
+            if (index >= 0) {
+                connection.subscribers.splice(index, 1)
+            }
         },
     }
 }
