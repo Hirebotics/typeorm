@@ -555,6 +555,18 @@ describe("sqlite driver > query runner ownership", () => {
                     QueryRunnerAlreadyReleasedError.name,
                 )
 
+                // The same runner, but without awaiting the release first.
+                // release() yields before it finishes even with no lease to
+                // give back, and a first statement in that window used to be
+                // granted the connection and keep it for good.
+                const racing = connection.createQueryRunner()
+                const releasing = racing.release()
+                const raced = connectOutcome(racing)
+                await releasing
+                expect(await raced).to.equal(
+                    QueryRunnerAlreadyReleasedError.name,
+                )
+
                 const startedAt = Date.now()
                 await connection.query("SELECT 1")
                 expect(Date.now() - startedAt).to.be.lessThan(1000)
@@ -587,6 +599,50 @@ describe("sqlite driver > query runner ownership", () => {
                 expect(Date.now() - startedAt).to.be.lessThan(5000)
 
                 await connection.initialize()
+            }),
+        )
+    })
+
+    it("should refuse a statement that races the release of a never-used runner", () => {
+        return Promise.all(
+            connections.map(async (connection) => {
+                // release() on a runner that never took a lease has nothing to
+                // revoke, so it yields with the runner not yet marked
+                // released. A first statement in that window was granted the
+                // connection, committed in autocommit, and then held the
+                // connection for the life of the process, because the release
+                // it raced had already passed over the lease it took.
+                const runner = connection.createQueryRunner()
+                let racingOutcome = "never ran"
+                try {
+                    const releasing = runner.release()
+                    // .then, not await: this statement has to start before the
+                    // release above has finished.
+                    const racing = runner
+                        .query(
+                            `INSERT INTO thing (name) VALUES ('after-release')`,
+                        )
+                        .then(
+                            () => "resolved",
+                            (err: Error) => err.constructor.name,
+                        )
+                    await releasing
+                    racingOutcome = await racing
+                } finally {
+                    await runner.release()
+                }
+
+                expect(racingOutcome).to.equal(
+                    QueryRunnerAlreadyReleasedError.name,
+                )
+
+                // The connection was never taken, so it is still free.
+                const startedAt = Date.now()
+                const names = (
+                    await connection.getRepository(Thing).find()
+                ).map((thing) => thing.name)
+                expect(Date.now() - startedAt).to.be.lessThan(1000)
+                expect(names).to.eql([])
             }),
         )
     })
