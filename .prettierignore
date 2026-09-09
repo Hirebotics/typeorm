@@ -4,3 +4,8 @@ node_modules/
 
 gulpfile.ts
 pnpm-lock.yaml
+
+# Hirebotics patch: generated test scaffolding, ignored by eslint.config.mjs but not here.
+# Without this, `pnpm run format:ci` fails on temp/<id>TestProject/*.ts for anyone who has
+# ever run the suite, so the project's own "prettier must pass" gate never passes.
+temp/

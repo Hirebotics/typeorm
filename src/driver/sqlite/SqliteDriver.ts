@@ -53,7 +53,9 @@ export class SqliteDriver extends AbstractSqliteDriver {
     async disconnect(): Promise<void> {
         return new Promise<void>((ok, fail) => {
             this.queryRunner = undefined
-            this.databaseConnection.close((err: any) =>
+            // Hirebotics patch: revoke every lease on a closing connection.
+            this.closeConnectionPool()
+            this.databaseConnection.close((err: Error) =>
                 err ? fail(err) : ok(),
             )
         })
@@ -63,9 +65,37 @@ export class SqliteDriver extends AbstractSqliteDriver {
      * Creates a query runner used to execute database queries.
      */
     createQueryRunner(mode: ReplicationMode): QueryRunner {
-        if (!this.queryRunner) this.queryRunner = new SqliteQueryRunner(this)
+        // Hirebotics patch: a fresh runner per caller, not upstream's one cached runner.
+        // A runner owns a transaction; sharing one loses the second caller's writes.
+        // AbstractSqliteQueryRunner.connect() serializes them on the single connection.
+        return new SqliteQueryRunner(this)
+    }
 
-        return this.queryRunner
+    /**
+     * Hirebotics patch: see AbstractSqliteDriver.rollback().
+     */
+    async rollback(): Promise<boolean> {
+        const databaseConnection = this.databaseConnection
+        return new Promise<boolean>((ok, fail) => {
+            databaseConnection.run(
+                "ROLLBACK",
+                (err: { code?: string } | null) => {
+                    if (!err) {
+                        ok(true)
+                        return
+                    }
+                    // node-sqlite3 exposes no way to ask whether a transaction is open.
+                    // The error code is the only signal.
+                    // A bare ROLLBACK raises SQLITE_ERROR when there is nothing to roll back.
+                    // A real failure raises something else, such as SQLITE_BUSY.
+                    if (err.code === "SQLITE_ERROR") {
+                        ok(false)
+                        return
+                    }
+                    fail(err)
+                },
+            )
+        })
     }
 
     normalizeType(column: {
@@ -125,6 +155,9 @@ export class SqliteDriver extends AbstractSqliteDriver {
      * Creates connection with the database.
      */
     protected async createDatabaseConnection() {
+        // Hirebotics patch: opts this driver into leased query runners.
+        this.createConnectionPool()
+
         if (
             this.options.flags === undefined ||
             !(this.options.flags & this.sqlite.OPEN_URI)

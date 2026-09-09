@@ -1,5 +1,6 @@
 import { QueryRunner } from "../../query-runner/QueryRunner"
 import { ObjectLiteral } from "../../common/ObjectLiteral"
+import { QueryRunnerAlreadyReleasedError } from "../../error/QueryRunnerAlreadyReleasedError"
 import { TransactionNotStartedError } from "../../error/TransactionNotStartedError"
 import { TableColumn } from "../../schema-builder/table/TableColumn"
 import { Table } from "../../schema-builder/table/Table"
@@ -8,6 +9,7 @@ import { TableForeignKey } from "../../schema-builder/table/TableForeignKey"
 import { View } from "../../schema-builder/view/View"
 import { Query } from "../Query"
 import { AbstractSqliteDriver } from "./AbstractSqliteDriver"
+import { SqliteConnectionLease } from "./SqliteConnectionPool"
 import { ReadStream } from "../../platform/PlatformTools"
 import { TableIndexOptions } from "../../schema-builder/options/TableIndexOptions"
 import { TableUnique } from "../../schema-builder/table/TableUnique"
@@ -38,6 +40,12 @@ export abstract class AbstractSqliteQueryRunner
 
     protected transactionPromise: Promise<any> | null = null
 
+    // Hirebotics patch: this runner's lease on the single connection.
+    // It is the only handle on it, and it is taken once and never replaced,
+    // so a statement after this runner released, or after its wait for the
+    // connection timed out, cannot quietly take a fresh one.
+    protected lease?: SqliteConnectionLease
+
     // -------------------------------------------------------------------------
     // Constructor
     // -------------------------------------------------------------------------
@@ -54,18 +62,53 @@ export abstract class AbstractSqliteQueryRunner
      * Creates/uses database connection from the connection pool to perform further operations.
      * Returns obtained database connection.
      */
-    connect(): Promise<any> {
-        return Promise.resolve(this.driver.databaseConnection)
+    async connect(): Promise<any> {
+        // Hirebotics patch: this runner leases the connection until release().
+        // Every path to sqlite awaits connect(), so the lease is taken here
+        // and this is the only place that hands the connection out.
+        const pool = this.driver.connectionPool
+        if (!pool) {
+            // This driver did not opt in to leasing.
+            return this.driver.databaseConnection
+        }
+        if (this.isReleased) {
+            throw new QueryRunnerAlreadyReleasedError()
+        }
+        if (!this.lease) {
+            this.lease = pool.acquire()
+        }
+        return this.lease.getConnection()
     }
 
     /**
      * Releases used database connection.
-     * We just clear loaded tables and sql in memory, because sqlite do not support multiple connections thus query runners.
+     *
+     * Hirebotics patch: upstream said sqlite cannot support multiple query runners.
+     * It can. A query runner owns a transaction, not a connection.
      */
-    release(): Promise<void> {
+    async release(): Promise<void> {
+        if (!this.driver.connectionPool) {
+            // This driver did not opt in to leasing.
+            // Upstream behaviour: clear memory and keep the runner reusable.
+            this.loadedTables = []
+            this.clearSqlMemory()
+            return
+        }
+        if (this.isReleased) {
+            return
+        }
+
+        // Marked released before any async boundaries, and before the lease is released.
+        // It signals a release is in progress to mitigate race conditions until released.
+        this.isReleased = true
+        this.isTransactionActive = false
+        this.transactionDepth = 0
         this.loadedTables = []
         this.clearSqlMemory()
-        return Promise.resolve()
+
+        // The lease knows whether this runner ever got its turn, so a runner
+        // still waiting in line cannot roll back the holder's transaction.
+        await this.lease?.release()
     }
 
     /**
@@ -108,7 +151,10 @@ export abstract class AbstractSqliteQueryRunner
                     await this.query("PRAGMA read_uncommitted = false")
                 }
             }
-            await this.query("BEGIN TRANSACTION")
+            // Hirebotics patch: IMMEDIATE takes the write lock up front.
+            // A deferred BEGIN fails SQLITE_BUSY_SNAPSHOT on its first write when
+            // another connection wrote in between, which no retry can ever clear.
+            await this.query("BEGIN IMMEDIATE")
         } else {
             await this.query(`SAVEPOINT typeorm_${this.transactionDepth}`)
         }

@@ -1,6 +1,6 @@
 import { ConnectionIsNotSetError } from "../../error/ConnectionIsNotSetError"
-import { QueryFailedError } from "../../error/QueryFailedError"
 import { QueryRunnerAlreadyReleasedError } from "../../error/QueryRunnerAlreadyReleasedError"
+import { QueryFailedError } from "../../error/QueryFailedError"
 import { QueryResult } from "../../query-runner/QueryResult"
 import { Broadcaster } from "../../subscriber/Broadcaster"
 import { BroadcasterResult } from "../../subscriber/BroadcasterResult"
@@ -53,7 +53,9 @@ export class SqliteQueryRunner extends AbstractSqliteQueryRunner {
         parameters?: any[],
         useStructuredResult = false,
     ): Promise<any> {
-        if (this.isReleased) throw new QueryRunnerAlreadyReleasedError()
+        if (this.isReleased) {
+            throw new QueryRunnerAlreadyReleasedError()
+        }
 
         const connection = this.driver.connection
         const options = connection.options as SqliteConnectionOptions
@@ -79,6 +81,10 @@ export class SqliteQueryRunner extends AbstractSqliteQueryRunner {
                 const isUpdateQuery = query.startsWith("UPDATE ")
 
                 const execute = async () => {
+                    // Hirebotics patch: confirm the lease is still valid.
+                    // Analogous to checking AbortSignal.aborted before an operation.
+                    this.lease?.assertNotRevoked()
+
                     if (isInsertQuery || isDeleteQuery || isUpdateQuery) {
                         await databaseConnection.run(query, parameters, handler)
                     } else {

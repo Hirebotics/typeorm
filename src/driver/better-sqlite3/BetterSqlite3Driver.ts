@@ -53,6 +53,8 @@ export class BetterSqlite3Driver extends AbstractSqliteDriver {
      */
     async disconnect(): Promise<void> {
         this.queryRunner = undefined
+        // Hirebotics patch: revoke every lease on a closing connection.
+        this.closeConnectionPool()
         this.databaseConnection.close()
     }
 
@@ -60,10 +62,22 @@ export class BetterSqlite3Driver extends AbstractSqliteDriver {
      * Creates a query runner used to execute database queries.
      */
     createQueryRunner(mode: ReplicationMode): QueryRunner {
-        if (!this.queryRunner)
-            this.queryRunner = new BetterSqlite3QueryRunner(this)
+        // Hirebotics patch: a fresh runner per caller, not upstream's one cached runner.
+        // A runner owns a transaction; sharing one loses the second caller's writes.
+        // AbstractSqliteQueryRunner.connect() serializes them on the single connection.
+        return new BetterSqlite3QueryRunner(this)
+    }
 
-        return this.queryRunner
+    /**
+     * Hirebotics patch: see AbstractSqliteDriver.rollback().
+     */
+    async rollback(): Promise<boolean> {
+        // inTransaction is sqlite3_get_autocommit(), so this needs no error handling.
+        if (!this.databaseConnection.inTransaction) {
+            return false
+        }
+        this.databaseConnection.exec("ROLLBACK")
+        return true
     }
 
     normalizeType(column: {
@@ -123,6 +137,9 @@ export class BetterSqlite3Driver extends AbstractSqliteDriver {
      * Creates connection with the database.
      */
     protected async createDatabaseConnection() {
+        // Hirebotics patch: opts this driver into leased query runners.
+        this.createConnectionPool()
+
         // not to create database directory if is in memory
         if (this.options.database !== ":memory:")
             await this.createDatabaseDirectory(
@@ -133,7 +150,6 @@ export class BetterSqlite3Driver extends AbstractSqliteDriver {
             database,
             readonly = false,
             fileMustExist = false,
-            timeout = 5000,
             verbose = null,
             nativeBinding = null,
             prepareDatabase,
@@ -141,7 +157,13 @@ export class BetterSqlite3Driver extends AbstractSqliteDriver {
         const databaseConnection = new this.sqlite(database, {
             readonly,
             fileMustExist,
-            timeout,
+            // Hirebotics patch: the better-sqlite3 library is synchronous.
+            // Its busy handler blocks the whole process while it waits.
+            // Therefore, to unblock the event loop we pass 0 as the timeout
+            // so a SQLITE_BUSY error is returned immediately.
+            // We implement our own busy-retry logic in the query runner.
+            // options.timeout still bounds how long a statement waits.
+            timeout: 0,
             verbose,
             nativeBinding,
         })

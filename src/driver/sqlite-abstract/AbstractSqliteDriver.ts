@@ -22,6 +22,7 @@ import { View } from "../../schema-builder/view/View"
 import { TableForeignKey } from "../../schema-builder/table/TableForeignKey"
 import { InstanceChecker } from "../../util/InstanceChecker"
 import { UpsertType } from "../types/UpsertType"
+import { SqliteConnectionPool } from "./SqliteConnectionPool"
 
 type DatabasesMap = Record<
     string,
@@ -49,6 +50,12 @@ export abstract class AbstractSqliteDriver implements Driver {
      * Sqlite has a single QueryRunner because it works on a single database connection.
      */
     queryRunner?: QueryRunner
+
+    /**
+     * Hirebotics patch: serializes query runners against the single connection.
+     * Only the drivers Beacon uses create one, so the other sqlite drivers are unaffected.
+     */
+    connectionPool?: SqliteConnectionPool
 
     /**
      * Real database connection with sqlite database.
@@ -288,6 +295,24 @@ export abstract class AbstractSqliteDriver implements Driver {
                 err ? fail(err) : ok(),
             )
         })
+    }
+
+    /**
+     * Hirebotics patch: runs ROLLBACK straight on the connection.
+     *
+     * No subscribers, no logging, no transaction bookkeeping.
+     * Going through QueryRunner.query() would let a BeforeQuery subscriber throw.
+     * The rollback would then never reach sqlite.
+     * Each driver implements it against its own sqlite library.
+     *
+     * Returns true when a transaction was rolled back.
+     * Returns false when there was nothing to roll back.
+     * Rejects only when neither of those could be established.
+     */
+    async rollback(): Promise<boolean> {
+        throw new TypeORMError(
+            `${this.constructor.name} does not implement rollback().`,
+        )
     }
 
     hasAttachedDatabases(): boolean {
@@ -928,5 +953,40 @@ export abstract class AbstractSqliteDriver implements Driver {
      */
     protected loadDependencies(): void {
         // dependencies have to be loaded in the specific driver
+    }
+
+    /**
+     * Hirebotics patch: opts this driver into leased query runners.
+     * Called by the drivers Beacon uses; the rest keep upstream's behaviour.
+     */
+    protected createConnectionPool(): void {
+        const { connectionLeaseTimeout } = this.options as {
+            connectionLeaseTimeout?: number
+        }
+        this.connectionPool = new SqliteConnectionPool({
+            // Read on grant, not now.
+            // The handle does not exist until createDatabaseConnection() returns.
+            getConnection: () => {
+                return this.databaseConnection
+            },
+            rollback: () => {
+                return this.rollback()
+            },
+            acquireTimeoutMs: connectionLeaseTimeout,
+        })
+    }
+
+    /**
+     * Hirebotics patch: revokes every lease on a connection that is closing.
+     * Without it a lease outlives the handle it was granted and the next
+     * statement reaches a closed connection.
+     *
+     * The closed pool is kept, not dropped.
+     * Dropping it would put this driver back on the unleased path, where
+     * connect() hands out the raw connection field -- by then a closed handle.
+     * connect() replaces the pool, so a re-initialized DataSource gets a fresh one.
+     */
+    protected closeConnectionPool(): void {
+        this.connectionPool?.close()
     }
 }

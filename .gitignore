@@ -5,6 +5,9 @@
 ### Node ###
 .node-version
 .nvmrc
+# Hirebotics patch: track .nvmrc. better-sqlite3@8.7.0 does not build on node 22+,
+# so the required version is a property of the fork, not of a developer's machine.
+!.nvmrc
 build/
 coverage/
 node_modules/
@@ -27,3 +30,7 @@ node_modules/
 ormlogs.log
 
 /test/github-issues/799/tmp/*
+.claude/worktrees/
+
+# Hirebotics patch: coverage output from `./beacon/test.sh --coverage`.
+beacon/coverage/

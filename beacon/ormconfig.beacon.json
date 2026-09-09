@@ -8,6 +8,13 @@
   },
   {
     "skip": false,
+    "name": "sqlite",
+    "type": "sqlite",
+    "database": "temp/sqlitedb.db",
+    "logging": false
+  },
+  {
+    "skip": false,
     "name": "postgres",
     "type": "postgres",
     "host": "localhost",
