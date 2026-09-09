@@ -182,39 +182,37 @@ export async function lockDatabase(
 }
 
 /**
- * Collects what the query runner logs,
- * so retries and lease behaviour can be asserted without depending on wall-clock timing.
+ * Records the rollbacks the connection pool runs when a lease goes back.
+ *
+ * The pool rolls back on the driver, not through query(), so no subscriber
+ * and no query logger can see it.
+ * This is the only seam that observes it.
  */
-export function captureLog(connection: DataSource) {
-    const messages: string[] = []
-    const logger = connection.logger
-    const original = logger.log
-
-    logger.log = (
-        level: "log" | "info" | "warn",
-        message: unknown,
-        queryRunner?: QueryRunner,
-    ) => {
-        if (typeof message === "string") {
-            messages.push(`${level}: ${message}`)
-        }
-        return original.call(logger, level, message, queryRunner)
+export function captureRollbacks(connection: DataSource) {
+    const driver = connection.driver as unknown as {
+        rollback: () => Promise<boolean>
     }
+    const original = driver.rollback
+    const wasRolledBackResults: boolean[] = []
 
-    const countMessagesMatching = (pattern: RegExp) => {
-        return messages.filter((message) => {
-            return pattern.test(message)
-        }).length
+    driver.rollback = async () => {
+        const wasRolledBack = await original.call(driver)
+        wasRolledBackResults.push(wasRolledBack)
+        return wasRolledBack
     }
 
     return {
-        getAbandonedTransactionRollbackCount: () => {
-            return countMessagesMatching(
-                /released with a transaction still open/,
-            )
+        /**
+         * How many rollbacks found a transaction open and undid it.
+         * A rollback that found nothing to undo does not count.
+         */
+        getRolledBackCount: () => {
+            return wasRolledBackResults.filter((wasRolledBack) => {
+                return wasRolledBack
+            }).length
         },
         restore: () => {
-            logger.log = original
+            driver.rollback = original
         },
     }
 }

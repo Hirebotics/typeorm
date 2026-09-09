@@ -972,7 +972,6 @@ export abstract class AbstractSqliteDriver implements Driver {
             rollback: () => {
                 return this.rollback()
             },
-            logger: this.connection.logger,
             acquireTimeoutMs: connectionLeaseTimeout,
         })
     }

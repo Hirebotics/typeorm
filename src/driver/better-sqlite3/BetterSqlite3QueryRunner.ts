@@ -1,4 +1,5 @@
 import { QueryFailedError } from "../../error/QueryFailedError"
+import { QueryRunnerAlreadyReleasedError } from "../../error/QueryRunnerAlreadyReleasedError"
 import { AbstractSqliteQueryRunner } from "../sqlite-abstract/AbstractSqliteQueryRunner"
 import { Broadcaster } from "../../subscriber/Broadcaster"
 import { BetterSqlite3Driver } from "./BetterSqlite3Driver"
@@ -95,15 +96,13 @@ export class BetterSqlite3QueryRunner extends AbstractSqliteQueryRunner {
 
         const stmt = await this.getStmt(query)
 
-        // Hirebotics patch: confirm the lease is still valid.
-        // Analogous to checking AbortSignal.aborted before an operation.
-        this.lease?.assertNotRevoked()
-
         try {
             const result = new QueryResult()
 
             if (stmt.reader) {
-                const raw = stmt.all(...parameters)
+                const raw = await this.runUntilUnlocked(() => {
+                    return stmt.all(...parameters)
+                })
 
                 result.raw = raw
 
@@ -111,7 +110,9 @@ export class BetterSqlite3QueryRunner extends AbstractSqliteQueryRunner {
                     result.records = raw
                 }
             } else {
-                const raw = stmt.run(...parameters)
+                const raw = await this.runUntilUnlocked(() => {
+                    return stmt.run(...parameters)
+                })
                 result.affected = raw.changes
                 result.raw = raw.lastInsertRowid
             }
@@ -148,6 +149,12 @@ export class BetterSqlite3QueryRunner extends AbstractSqliteQueryRunner {
 
             return result
         } catch (err) {
+            // Hirebotics patch: losing the lease is not a query failure.
+            // The statement never reached sqlite.
+            // Report it as itself so a caller can tell the two apart.
+            if (err instanceof QueryRunnerAlreadyReleasedError) {
+                throw err
+            }
             connection.logger.logQueryError(err, query, parameters, this)
             throw new QueryFailedError(query, parameters, err)
         }
@@ -156,6 +163,45 @@ export class BetterSqlite3QueryRunner extends AbstractSqliteQueryRunner {
     // -------------------------------------------------------------------------
     // Protected Methods
     // -------------------------------------------------------------------------
+
+    /**
+     * Hirebotics patch: waits out a locked database in JavaScript.
+     *
+     * The better-sqlite3 library is synchronous.
+     * Letting sqlite wait freezes every timer in the process.
+     * Sleeping between attempts leaves the node event loop free.
+     *
+     * Retrying is safe because BEGIN IMMEDIATE takes the write lock up front.
+     * A statement inside a transaction we began cannot be refused.
+     * So a refusal always means nothing was applied.
+     *
+     * The lease is checked on every attempt.
+     */
+    protected async runUntilUnlocked<T>(execute: () => T): Promise<T> {
+        const { timeout = 5000 } = this.driver.options
+        const giveUpAtMs = Date.now() + timeout
+
+        while (true) {
+            this.lease?.assertNotRevoked()
+            try {
+                return execute()
+            } catch (err) {
+                // SQLITE_BUSY is the only error worth another try.
+                // SQLITE_BUSY_SNAPSHOT is stale and waiting can never fix it.
+                const isRetryableError = err?.code === "SQLITE_BUSY"
+                const remainingMs = giveUpAtMs - Date.now()
+                if (!isRetryableError || remainingMs <= 0) {
+                    throw err
+                }
+                // Sleep the interval, or whatever budget is left if less.
+                const busyRetryIntervalMs = 50
+                const sleepMs = Math.min(busyRetryIntervalMs, remainingMs)
+                await new Promise<void>((ok) => {
+                    setTimeout(ok, sleepMs)
+                })
+            }
+        }
+    }
 
     protected async loadTableRecords(
         tablePath: string,

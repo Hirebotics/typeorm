@@ -1,5 +1,4 @@
 import { QueryRunnerAlreadyReleasedError, TypeORMError } from "../../error"
-import { Logger } from "../../logger/Logger"
 
 /**
  * Exclusive leasing of a sqlite driver's single connection.
@@ -24,7 +23,36 @@ import { Logger } from "../../logger/Logger"
  * A query runner holds a lease and nothing else.
  */
 
-const DEFAULT_ACQUIRE_TIMEOUT_MS = 60_000
+/**
+ * Hirebotics: a query runner never got its turn at the connection.
+ */
+class SqliteConnectionTimeoutError extends TypeORMError {
+    constructor(elapsedMs: number) {
+        super(
+            `Waited ${elapsedMs}ms for the sqlite connection. ` +
+                `A query runner was never released, ` +
+                `or one was created inside another's transaction.`,
+        )
+    }
+}
+
+/**
+ * Hirebotics: the connection closed while a query runner still held it.
+ */
+class SqliteConnectionClosedError extends TypeORMError {
+    constructor() {
+        super(`The DataSource was destroyed.`)
+    }
+}
+
+/**
+ * Hirebotics: the connection can no longer be trusted.
+ */
+class SqliteConnectionUnusableError extends TypeORMError {
+    constructor(cause: unknown) {
+        super(`The rollback on release failed. ${cause}`)
+    }
+}
 
 /**
  * Typed loosely to match the driver's own connection field.
@@ -46,8 +74,10 @@ export interface SqliteConnectionPoolOptions {
      */
     rollback: () => Promise<boolean>
 
-    logger: Logger
-
+    /**
+     * The time to wait for a connection to become available before timing out.
+     * Defaults to 60,000ms (1 minute).
+     */
     acquireTimeoutMs?: number
 }
 
@@ -139,7 +169,9 @@ export class SqliteConnectionLease {
      */
     startWaitTimer(timeoutMs: number): void {
         this.waitTimer = setTimeout(() => {
-            this.revoke(this.buildTimeoutError())
+            this.revoke(
+                new SqliteConnectionTimeoutError(Date.now() - this.queuedAtMs),
+            )
         }, timeoutMs)
     }
 
@@ -148,20 +180,6 @@ export class SqliteConnectionLease {
             clearTimeout(this.waitTimer)
             this.waitTimer = undefined
         }
-    }
-
-    /**
-     * Reports the wait that elapsed, not the deadline that was configured.
-     * better-sqlite3 blocks the event loop inside sqlite3_step, so this timer
-     * can fire late and a message quoting the deadline would understate the hold.
-     */
-    private buildTimeoutError(): TypeORMError {
-        const elapsedMs = Date.now() - this.queuedAtMs
-        return new TypeORMError(
-            `Timed out after ${elapsedMs}ms waiting for the sqlite connection. ` +
-                `A query runner was never released, or a second query runner was ` +
-                `created while the first still held an open transaction.`,
-        )
     }
 }
 
@@ -175,7 +193,15 @@ export class SqliteConnectionPool {
      */
     private refusalReason: Error | undefined
 
-    constructor(private options: SqliteConnectionPoolOptions) {}
+    private getConnection: () => SqliteConnection
+    private rollback: () => Promise<boolean>
+    private acquireTimeoutMs: number
+
+    constructor(options: SqliteConnectionPoolOptions) {
+        this.getConnection = options.getConnection
+        this.rollback = options.rollback
+        this.acquireTimeoutMs = options.acquireTimeoutMs ?? 60_000
+    }
 
     /**
      * Takes a place in line for the connection.
@@ -193,9 +219,7 @@ export class SqliteConnectionPool {
         }
         if (this.heldLease) {
             this.queue.push(lease)
-            lease.startWaitTimer(
-                this.options.acquireTimeoutMs ?? DEFAULT_ACQUIRE_TIMEOUT_MS,
-            )
+            lease.startWaitTimer(this.acquireTimeoutMs)
             return lease
         }
         this.grantTo(lease)
@@ -234,11 +258,7 @@ export class SqliteConnectionPool {
      * on it reaches a closed connection instead of a clear error.
      */
     close(): void {
-        this.refuse(
-            new TypeORMError(
-                `The sqlite connection was closed because the DataSource was destroyed.`,
-            ),
-        )
+        this.refuse(new SqliteConnectionClosedError())
     }
 
     dropFromQueue(lease: SqliteConnectionLease): void {
@@ -255,30 +275,19 @@ export class SqliteConnectionPool {
      * A caller that ran a raw BEGIN never sets them,
      * and its transaction would then outlive the runner.
      *
-     * There are three outcomes:
-     *  1. Rolled back: warn, then hand the connection on.
-     *  2. Nothing was open: hand it on, say nothing.
-     *  3. Anything else: the transaction state is unknown, so refuse the connection.
-     *     Handing it on would let the next runner read the abandoned rows,
-     *     and its BEGIN would fail for as long as the process lives.
+     * A rollback that finds nothing open is fine.
+     * The connection is handed on either way.
+     *
+     * A rollback that fails leaves the transaction state unknown.
+     * Refuse the connection in that case.
+     * Handing it on would let the next runner read the abandoned rows,
+     * and its BEGIN would fail for as long as the process lives.
      */
     private async rollbackAbandonedTransaction(): Promise<void> {
-        let wasRolledBack: boolean
         try {
-            wasRolledBack = await this.options.rollback()
+            await this.rollback()
         } catch (err) {
-            this.refuse(
-                new TypeORMError(
-                    `The sqlite connection was left with an abandoned transaction: the rollback on release failed. ${err}`,
-                ),
-            )
-            return
-        }
-        if (wasRolledBack) {
-            this.options.logger.log(
-                "warn",
-                `Query runner released with a transaction still open. Rolled it back.`,
-            )
+            this.refuse(new SqliteConnectionUnusableError(err))
         }
     }
 
@@ -301,6 +310,6 @@ export class SqliteConnectionPool {
 
     private grantTo(lease: SqliteConnectionLease): void {
         this.heldLease = lease
-        lease.grant(this.options.getConnection())
+        lease.grant(this.getConnection())
     }
 }
