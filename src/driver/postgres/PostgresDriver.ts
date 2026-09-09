@@ -639,7 +639,8 @@ export class PostgresDriver implements Driver {
      * Creates a query runner used to execute database queries.
      */
     createQueryRunner(mode: ReplicationMode): PostgresQueryRunner {
-        // Always the extension subclass: it is a no-op until extendPostgresDriver() registers hooks.
+        // Hirebotics patch: the extension subclass runs the extendPostgresDriver() hooks.
+        // Identical to PostgresQueryRunner until hooks are registered.
         return new PostgresQueryRunnerExtension(this, mode)
     }
 

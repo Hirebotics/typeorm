@@ -1,10 +1,15 @@
 import { PostgresQueryRunner } from "./PostgresQueryRunner"
 
 /**
+ * Per-checkout hooks for the postgres connection pool.
+ * Hirebotics file, not part of upstream TypeORM.
+ */
+
+/**
  * Hooks that run when a postgres connection is checked out of the pool and handed back.
  *
- * The argument is the raw `pg` client the pool handed out. It is typed loosely because
- * typeorm does not depend on `pg`'s types.
+ * The argument is the raw `pg` client the pool handed out.
+ * It is typed loosely because typeorm does not depend on `pg`'s types.
  */
 export interface PostgresExtensionOptions {
     onConnect?: (pg: any) => Promise<void>
@@ -20,32 +25,54 @@ let registeredOptions: PostgresExtensionOptions | undefined
 /**
  * Query runner that runs the registered hooks around the pooled connection's lifetime.
  *
- * Use case: session-scoped state, such as a `SET app.current_tenant` on checkout that
- * must be reset before the connection returns to the pool.
+ * Use case: session-scoped state,
+ * such as a `SET app.current_tenant` on checkout
+ * that must be reset before the connection returns to the pool.
+ *
+ * The `onRelease` option must clear everything `onConnect` set
+ * because it can run in a different async context from `onConnect`,
+ * so it cannot decide what to clear by reading ambient request state.
+ * A skipped cleanup leaks state to the next borrower.
  */
 export class PostgresQueryRunnerExtension extends PostgresQueryRunner {
     private rawConnection: any
 
-    async connect(): Promise<any> {
-        // super.connect() checks a client out of the pool only on the first call,
-        // afterwards it returns the memoized connection.
-        // query() calls connect() for every query, so guard the hook to fire
-        // once per real checkout rather than once per query.
-        const alreadyConnected = !!(
-            this.databaseConnection || this.databaseConnectionPromise
-        )
+    /**
+     * Resolves only once the pool checkout *and* onConnect have both finished.
+     */
+    private connectPromise: Promise<any> | undefined
 
+    /**
+     * Resolves only once the pool checkin *and* onRelease have both finished.
+     */
+    private releasePromise: Promise<void> | undefined
+
+    async connect(): Promise<any> {
+        if (!this.connectPromise) {
+            this.connectPromise = this.connectWithHook()
+        }
+        return this.connectPromise
+    }
+
+    async release(): Promise<void> {
+        if (!this.releasePromise) {
+            this.releasePromise = this.releaseWithHook()
+        }
+        return this.releasePromise
+    }
+
+    /**
+     * Checks a client out of the pool and runs onConnect before anyone sees it.
+     */
+    private async connectWithHook(): Promise<any> {
         this.rawConnection = await super.connect()
 
-        if (
-            !alreadyConnected &&
-            this.rawConnection &&
-            registeredOptions?.onConnect
-        ) {
+        if (registeredOptions?.onConnect) {
             try {
                 await registeredOptions.onConnect(this.rawConnection)
             } catch (err) {
-                // Never fail the checkout: the connection itself is usable.
+                // The client is usable, only its session state is missing,
+                // so a failed setup is only logged.
                 this.connection.logger.log(
                     "warn",
                     `Postgres onConnect extension failed. ${err}`,
@@ -57,13 +84,17 @@ export class PostgresQueryRunnerExtension extends PostgresQueryRunner {
         return this.rawConnection
     }
 
-    async release(): Promise<void> {
+    /**
+     * Runs onRelease before the client goes back to the pool.
+     */
+    private async releaseWithHook(): Promise<void> {
         if (!this.isReleased && this.rawConnection) {
             if (registeredOptions?.onRelease) {
                 try {
                     await registeredOptions.onRelease(this.rawConnection)
                 } catch (err) {
-                    // Swallowed so the connection is still returned to the pool.
+                    // The client goes back to the pool either way,
+                    // so a failed cleanup is only logged.
                     this.connection.logger.log(
                         "warn",
                         `Postgres onRelease extension failed. ${err}`,
@@ -71,7 +102,6 @@ export class PostgresQueryRunnerExtension extends PostgresQueryRunner {
                     )
                 }
             }
-
             this.rawConnection = undefined
         }
 
