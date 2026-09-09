@@ -150,7 +150,6 @@ export class BetterSqlite3Driver extends AbstractSqliteDriver {
             database,
             readonly = false,
             fileMustExist = false,
-            timeout = 5000,
             verbose = null,
             nativeBinding = null,
             prepareDatabase,
@@ -158,7 +157,13 @@ export class BetterSqlite3Driver extends AbstractSqliteDriver {
         const databaseConnection = new this.sqlite(database, {
             readonly,
             fileMustExist,
-            timeout,
+            // Hirebotics patch: the better-sqlite3 library is synchronous.
+            // Its busy handler blocks the whole process while it waits.
+            // Therefore, to unblock the event loop we pass 0 as the timeout
+            // so a SQLITE_BUSY error is returned immediately.
+            // We implement our own busy-retry logic in the query runner.
+            // options.timeout still bounds how long a statement waits.
+            timeout: 0,
             verbose,
             nativeBinding,
         })

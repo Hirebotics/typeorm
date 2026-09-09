@@ -15,8 +15,9 @@ import {
 import { Thing } from "./entity/Thing"
 import {
     captureExecutedSql,
-    captureLog,
+    captureRollbacks,
     captureSql,
+    openSecondHandle,
     executeOutOfBand,
     expectBothSqliteDrivers,
     SQLITE_DRIVERS,
@@ -179,16 +180,14 @@ describe("sqlite driver > query runner ownership", () => {
     it("should roll back and free the connection when a runner is released mid-transaction", () => {
         return Promise.all(
             connections.map(async (connection) => {
-                const log = captureLog(connection)
+                const rollbacks = captureRollbacks(connection)
                 try {
                     const abandoned = connection.createQueryRunner()
                     await abandoned.startTransaction()
                     await abandoned.manager.save(Thing, { name: "abandoned" })
                     await abandoned.release()
 
-                    expect(
-                        log.getAbandonedTransactionRollbackCount(),
-                    ).to.be.greaterThan(0)
+                    expect(rollbacks.getRolledBackCount()).to.be.greaterThan(0)
 
                     // The connection is usable again, and the abandoned work is gone.
                     const names = (
@@ -198,7 +197,7 @@ describe("sqlite driver > query runner ownership", () => {
                     })
                     expect(names).to.eql([])
                 } finally {
-                    log.restore()
+                    rollbacks.restore()
                 }
             }),
         )
@@ -209,7 +208,7 @@ describe("sqlite driver > query runner ownership", () => {
             connections.map(async (connection) => {
                 // A raw BEGIN opens a transaction in sqlite without setting any runner flag.
                 // Teardown has to track it separately.
-                const log = captureLog(connection)
+                const rollbacks = captureRollbacks(connection)
                 const runner = connection.createQueryRunner()
                 try {
                     await runner.query("BEGIN TRANSACTION")
@@ -218,12 +217,10 @@ describe("sqlite driver > query runner ownership", () => {
                     )
                 } finally {
                     await runner.release()
-                    log.restore()
+                    rollbacks.restore()
                 }
 
-                expect(
-                    log.getAbandonedTransactionRollbackCount(),
-                ).to.be.greaterThan(0)
+                expect(rollbacks.getRolledBackCount()).to.be.greaterThan(0)
 
                 const startedAt = Date.now()
                 const names = (
@@ -290,7 +287,7 @@ describe("sqlite driver > query runner ownership", () => {
                 // subscriber throws.
                 // On a nested begin the outer transaction is still open in sqlite.
                 // Teardown must still see it and roll it back.
-                const log = captureLog(connection)
+                const rollbacks = captureRollbacks(connection)
                 let shouldThrowOnNestedBegin = false
                 const subscriber: EntitySubscriberInterface = {
                     beforeTransactionStart() {
@@ -320,12 +317,10 @@ describe("sqlite driver > query runner ownership", () => {
                         connection.subscribers.indexOf(subscriber),
                         1,
                     )
-                    log.restore()
+                    rollbacks.restore()
                 }
 
-                expect(
-                    log.getAbandonedTransactionRollbackCount(),
-                ).to.be.greaterThan(0)
+                expect(rollbacks.getRolledBackCount()).to.be.greaterThan(0)
 
                 // The orphaned work is gone and the connection is free again.
                 const startedAt = Date.now()
@@ -668,7 +663,7 @@ describe("sqlite driver > query runner ownership", () => {
                 // transaction open in sqlite. Release has to roll it back, or
                 // the next runner reads rows the caller was told were lost and
                 // its own BEGIN fails for as long as the process lives.
-                const log = captureLog(connection)
+                const rollbacks = captureRollbacks(connection)
                 connection.subscribers.push({
                     beforeQuery(event: { query: string }) {
                         if (event.query === "COMMIT") {
@@ -699,9 +694,7 @@ describe("sqlite driver > query runner ownership", () => {
                     connection.subscribers.length = 0
                     await holder.release()
 
-                    expect(
-                        log.getAbandonedTransactionRollbackCount(),
-                    ).to.be.greaterThan(0)
+                    expect(rollbacks.getRolledBackCount()).to.be.greaterThan(0)
                     expect(await next.query(`SELECT name FROM thing`)).to.eql(
                         [],
                     )
@@ -710,7 +703,7 @@ describe("sqlite driver > query runner ownership", () => {
                     await next.commitTransaction()
                 } finally {
                     connection.subscribers.length = 0
-                    log.restore()
+                    rollbacks.restore()
                     await next.release()
                     await holder.release()
                 }
@@ -1009,7 +1002,7 @@ describe("sqlite driver > query runner ownership > lease timeout", () => {
                 }
 
                 expect(message).to.match(
-                    /Timed out after \d+ms waiting for the sqlite connection/,
+                    /Waited \d+ms for the sqlite connection/,
                 )
                 // The lock is taken in connect(), before any SQL is known, so the
                 // message names the cause rather than the statement.
@@ -1104,7 +1097,7 @@ describe("sqlite driver > query runner ownership > lease timeout", () => {
                     await holder.startTransaction()
                     await waiter
                         .query("SELECT 1")
-                        .should.be.rejectedWith(/Timed out after \d+ms/)
+                        .should.be.rejectedWith(/Waited \d+ms/)
 
                     await holder.commitTransaction()
                     // The holder keeps the connection until it is released,
@@ -1119,7 +1112,7 @@ describe("sqlite driver > query runner ownership > lease timeout", () => {
                     const startedAt = Date.now()
                     await waiter
                         .query("SELECT 1")
-                        .should.be.rejectedWith(/Timed out after \d+ms/)
+                        .should.be.rejectedWith(/Waited \d+ms/)
                     expect(Date.now() - startedAt).to.be.lessThan(400)
                 } finally {
                     await waiter.release()
@@ -1232,14 +1225,21 @@ describe("sqlite driver > query runner ownership > unusable connection", () => {
                 }
 
                 const next = connection.createQueryRunner()
-                let message = "no error"
+                let failure: unknown = "no error"
                 try {
                     await next.query(`SELECT name FROM thing`)
                 } catch (err) {
-                    message = (err as Error).message
+                    failure = err
                 }
-                expect(message).to.contain("abandoned transaction")
-                expect(message).to.contain("database is locked")
+                // Asserted by name, not by type.
+                // The pool keeps its error classes to itself.
+                expect((failure as Error).name).to.equal(
+                    "SqliteConnectionUnusableError",
+                )
+                // The library's own reason is carried through.
+                expect((failure as Error).message).to.contain(
+                    "database is locked",
+                )
             }),
         )
     })
@@ -1290,5 +1290,160 @@ describe("sqlite driver > query runner ownership > driver without leasing", () =
             await second.release()
             await first.release()
         }
+    })
+})
+
+describe("sqlite driver > busy retry", () => {
+    let connections: DataSource[]
+    before(async () => {
+        // better-sqlite3 only. node-sqlite3 waits on the libuv threadpool, so
+        // its busy handler never blocks the event loop and needs no retry.
+        connections = await createTestingConnections({
+            entities: TEST_ENTITIES,
+            enabledDrivers: ["better-sqlite3"],
+            driverSpecific: { timeout: 1_000 },
+        })
+        expect(connections.length).to.equal(1)
+    })
+    beforeEach(() => {
+        return reloadTestingDatabases(connections)
+    })
+    after(() => {
+        return closeTestingConnections(connections)
+    })
+
+    it("should wait out a locked database without blocking the event loop", () => {
+        return Promise.all(
+            connections.map(async (connection) => {
+                // Another connection holds the write lock for a while. The
+                // write below has to outlast it, and the process has to keep
+                // running timers while it waits.
+                const holdMs = 200
+                const other = await openSecondHandle(connection)
+                await other.exec("BEGIN IMMEDIATE")
+                await other.exec(`INSERT INTO thing (name) VALUES ('holder')`)
+                setTimeout(() => {
+                    void other.exec("COMMIT")
+                }, holdMs)
+
+                let ticks = 0
+                const ticker = setInterval(() => {
+                    ticks += 1
+                }, 10)
+                const startedAt = Date.now()
+                try {
+                    await connection.getRepository(Thing).save({ name: "mine" })
+                } finally {
+                    clearInterval(ticker)
+                    await other.close()
+                }
+                const elapsedMs = Date.now() - startedAt
+
+                // It had to wait for the holder, not fail fast.
+                expect(elapsedMs).to.be.greaterThan(holdMs - 100)
+                // A blocking wait inside sqlite runs no timers at all.
+                // Allow half the theoretical rate for a loaded machine.
+                expect(ticks).to.be.greaterThan(elapsedMs / 10 / 2)
+
+                const names = (await connection.getRepository(Thing).find())
+                    .map((thing) => {
+                        return thing.name
+                    })
+                    .sort()
+                expect(names).to.eql(["holder", "mine"])
+            }),
+        )
+    })
+
+    it("should refuse a statement whose runner is released while it waits", () => {
+        return Promise.all(
+            connections.map(async (connection) => {
+                // Sleeping between attempts is a window release() can run in.
+                // A statement that woke up after that would execute on a
+                // connection the next runner owns, and die with its rollback.
+                const runner = connection.createQueryRunner()
+                const other = await openSecondHandle(connection)
+                let outcome = "never ran"
+                try {
+                    // Takes the lease without taking the write lock.
+                    await runner.query("SELECT 1")
+
+                    await other.exec("BEGIN IMMEDIATE")
+                    await other.exec(
+                        `INSERT INTO thing (name) VALUES ('holder')`,
+                    )
+
+                    // .then, not await: this statement has to be mid-retry
+                    // when the release below happens.
+                    const pending = runner
+                        .query(`INSERT INTO thing (name) VALUES ('waiting')`)
+                        .then(
+                            () => {
+                                return "resolved"
+                            },
+                            (err: Error) => {
+                                return err.constructor.name
+                            },
+                        )
+
+                    // The first attempt fails at once, because sqlite is told
+                    // not to wait, so this lands inside the 50ms sleep.
+                    await new Promise((ok) => {
+                        setTimeout(ok, 25)
+                    })
+                    await runner.release()
+
+                    outcome = await pending
+                } finally {
+                    await other.exec("ROLLBACK")
+                    await other.close()
+                    await runner.release()
+                }
+
+                expect(outcome).to.equal(QueryRunnerAlreadyReleasedError.name)
+
+                // The refused statement left nothing behind.
+                const names = (
+                    await connection.getRepository(Thing).find()
+                ).map((thing) => {
+                    return thing.name
+                })
+                expect(names).to.eql([])
+            }),
+        )
+    })
+
+    it("should give up on a locked database once the timeout is spent", () => {
+        return Promise.all(
+            connections.map(async (connection) => {
+                // The holder never lets go, so the retry has to stop.
+                const other = await openSecondHandle(connection)
+                await other.exec("BEGIN IMMEDIATE")
+                await other.exec(`INSERT INTO thing (name) VALUES ('holder')`)
+
+                const { timeout } = connection.options as { timeout?: number }
+                expect(timeout, "suite must pin a short timeout").to.equal(
+                    1_000,
+                )
+
+                const startedAt = Date.now()
+                let code = "no error"
+                try {
+                    await connection.getRepository(Thing).save({ name: "mine" })
+                } catch (err) {
+                    code =
+                        (err as { driverError?: { code?: string } }).driverError
+                            ?.code ?? "unknown"
+                } finally {
+                    await other.exec("ROLLBACK")
+                    await other.close()
+                }
+                const elapsedMs = Date.now() - startedAt
+
+                expect(code).to.equal("SQLITE_BUSY")
+                // Bounded by the configured timeout, not by sqlite's default.
+                expect(elapsedMs).to.be.lessThan(3000)
+            }),
+        )
     })
 })
